@@ -4,8 +4,12 @@
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List, AsyncIterator
+import logging
+from openai import AuthenticationError, APIError
 from ..core.llm_client import LLMClient
 from ..core.prompt_manager import PromptManager
+
+logger = logging.getLogger(__name__)
 
 
 class BaseAgent(ABC):
@@ -87,13 +91,44 @@ class BaseAgent(ABC):
             {"role": "user", "content": query}
         ]
         
-        if stream:
-            async for chunk in self.llm_client.astream(messages):
-                async for content in self.llm_client.get_stream_content([chunk]):
-                    yield content
-        else:
-            completion = await self.llm_client.achat(messages)
-            yield self.llm_client.get_content(completion)
+        try:
+            if stream:
+                # 流式输出：直接传递内容，让前端处理 think 标签
+                # DeepSeek 的 think 过程会以 <think>...</think> 标签形式返回
+                async for chunk in self.llm_client.astream(messages):
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        # 直接传递内容，前端会检测和处理 think 标签
+                        yield chunk.choices[0].delta.content
+            else:
+                completion = await self.llm_client.achat(messages)
+                # 提取 think 过程和实际内容
+                think_content, actual_content = self.llm_client.extract_think_and_content(completion)
+                
+                # 如果有 think 内容，包装在标签中
+                if think_content:
+                    yield f"<think>{think_content}</think>\n\n{actual_content}"
+                else:
+                    yield actual_content
+        except AuthenticationError as e:
+            error_msg = (
+                f"\n\n❌ 认证错误 (Error code: 401 - Invalid token)\n"
+                f"请检查 API 密钥是否正确设置。\n"
+                f"设置方法: export SILICONFLOW_API_KEY='your_api_key_here'\n"
+                f"详细错误: {str(e)}"
+            )
+            logger.error(f"API 认证失败: {e}")
+            yield error_msg
+        except APIError as e:
+            error_msg = (
+                f"\n\n❌ API 错误 (Error code: {getattr(e, 'status_code', 'unknown')})\n"
+                f"详细错误: {str(e)}"
+            )
+            logger.error(f"API 调用失败: {e}")
+            yield error_msg
+        except Exception as e:
+            error_msg = f"\n\n❌ 错误: {str(e)}"
+            logger.error(f"聊天处理失败: {e}", exc_info=True)
+            yield error_msg
     
     def get_file_paths(self, uploaded_files: List[Dict[str, str]]) -> List[str]:
         """

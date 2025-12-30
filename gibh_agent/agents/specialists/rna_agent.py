@@ -4,6 +4,7 @@
 重构自现有的 BioBlendAgent
 """
 import json
+import os
 from typing import Dict, Any, List, Optional, AsyncIterator
 from ..base_agent import BaseAgent
 from ...core.llm_client import LLMClient
@@ -36,10 +37,12 @@ class RNAAgent(BaseAgent):
         super().__init__(llm_client, prompt_manager, "rna_expert")
         
         self.dispatcher = dispatcher
-        self.cellranger_tool = CellRangerTool(cellranger_config or {})
-        self.scanpy_tool = ScanpyTool(scanpy_config or {})
+        self.cellranger_config = cellranger_config or {}
+        self.scanpy_config = scanpy_config or {}
+        self.cellranger_tool = CellRangerTool(self.cellranger_config)
+        self.scanpy_tool = ScanpyTool(self.scanpy_config)
         
-        # 标准工作流步骤
+        # 标准工作流步骤（十步流程）
         self.workflow_steps = [
             {"name": "1. Quality Control", "tool_id": "local_qc", "desc": "过滤低质量细胞和基因"},
             {"name": "2. Normalization", "tool_id": "local_normalize", "desc": "数据标准化"},
@@ -49,6 +52,8 @@ class RNAAgent(BaseAgent):
             {"name": "6. Compute Neighbors", "tool_id": "local_neighbors", "desc": "构建邻接图"},
             {"name": "7. Clustering", "tool_id": "local_cluster", "desc": "Leiden 聚类"},
             {"name": "8. UMAP Visualization", "tool_id": "local_umap", "desc": "UMAP 可视化"},
+            {"name": "9. t-SNE Visualization", "tool_id": "local_tsne", "desc": "t-SNE 可视化"},
+            {"name": "10. Find Markers", "tool_id": "local_markers", "desc": "寻找 Marker 基因"},
         ]
     
     async def process_query(
@@ -176,7 +181,13 @@ Return JSON only:
         
         try:
             completion = await self.llm_client.achat(messages, temperature=0.1, max_tokens=256)
-            response = self.llm_client.get_content(completion)
+            # 提取 think 过程和实际内容
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            # 如果有 think 内容，记录日志（可选）
+            if think_content:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"RNA Agent think process: {think_content[:200]}...")
             
             # 解析 JSON
             json_str = response.strip()
@@ -209,7 +220,7 @@ Return JSON only:
         """
         执行工作流
         
-        核心：只处理文件路径，生成脚本，通过 TaskDispatcher 提交
+        核心：直接执行 scanpy 分析流程（参考旧版本实现）
         
         Args:
             workflow_config: 工作流配置
@@ -217,11 +228,8 @@ Return JSON only:
             output_dir: 输出目录
         
         Returns:
-            任务提交信息
+            分析报告
         """
-        if not self.dispatcher:
-            raise ValueError("TaskDispatcher not configured")
-        
         # 检测输入文件类型
         input_path = file_paths[0] if file_paths else None
         if not input_path:
@@ -229,33 +237,28 @@ Return JSON only:
         
         file_type = self.detect_file_type(input_path)
         
-        # 生成脚本
+        # 设置输出目录
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        
+        # 更新 scanpy 工具的输出目录
+        self.scanpy_config["output_dir"] = output_dir
+        # 重新初始化 scanpy 工具以使用新的输出目录
+        self.scanpy_tool = ScanpyTool(self.scanpy_config)
+        
+        # 直接执行 Scanpy 流程
         if file_type == "fastq":
-            # 需要先运行 Cell Ranger
-            script = self.cellranger_tool.generate_count_script(
-                fastq_dir=input_path,
-                sample_id="sample1",
-                output_dir=output_dir
-            )
+            # 需要先运行 Cell Ranger（暂不支持，先跳过）
+            raise NotImplementedError("Cell Ranger preprocessing is not yet implemented")
         else:
-            # 直接运行 Scanpy
+            # 直接运行 Scanpy 分析
             steps = workflow_config.get("steps", [])
-            script = self.scanpy_tool.generate_workflow_script(
-                input_path=input_path,
-                output_dir=output_dir,
-                steps=steps
+            
+            # 执行分析流程
+            report = self.scanpy_tool.run_pipeline(
+                data_input=input_path,
+                steps_config=steps
             )
-        
-        # 提交任务
-        task_info = await self.dispatcher.submit_script(
-            script_content=script,
-            script_name="rna_workflow.sh",
-            work_dir=output_dir
-        )
-        
-        return {
-            "status": "submitted",
-            "task_info": task_info,
-            "script": script
-        }
+            
+            return report
 

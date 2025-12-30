@@ -29,8 +29,9 @@ export VLLM_VL_URL="http://localhost:8000/v1"
 export LLM_VL_MODEL="qwen3-vl"
 
 # 云端 LLM（可选）
-export DEEPSEEK_API_KEY="your_key_here"
-export SILICONFLOW_API_KEY="your_key_here"
+export SILICONFLOW_API_KEY="sk-xgwvrxknbzbewlhkvlwenngtoppluiceipbglpgshyaxgjqc"
+# 可选：自定义模型名称（默认: Pro/deepseek-ai/DeepSeek-V3.2）
+# export SILICONFLOW_MODEL="Pro/deepseek-ai/DeepSeek-V3.2"  # 推荐使用 V3.2
 
 # 路径配置
 export UPLOAD_DIR="/app/uploads"

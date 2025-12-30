@@ -188,7 +188,13 @@ Return JSON:
         
         try:
             completion = await self.llm_client.achat(messages, temperature=0.1, max_tokens=256)
-            response = self.llm_client.get_content(completion)
+            # 提取 think 过程和实际内容
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            # 如果有 think 内容，记录日志（可选）
+            if think_content:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Router think process: {think_content[:200]}...")
             
             # 解析 JSON
             json_str = response.strip()
@@ -205,8 +211,17 @@ Return JSON:
                 route_result["routing"] = self.ROUTING_MAP.get(modality, "rna_agent")
             
             return route_result
+        except json.JSONDecodeError as e:
+            # JSON 解析失败，使用默认路由
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"LLM routing JSON parse failed: {e}, response: {response[:200]}")
+            return None
         except Exception as e:
-            print(f"LLM routing failed: {e}")
+            # 其他错误，使用默认路由
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"LLM routing failed: {e}", exc_info=True)
             return None
     
     def _detect_intent(self, query: str) -> str:

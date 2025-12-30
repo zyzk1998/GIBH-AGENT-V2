@@ -155,6 +155,58 @@ class LLMClient:
         """从 ChatCompletion 中提取内容"""
         return completion.choices[0].message.content
     
+    def extract_think_and_content(self, completion: ChatCompletion) -> tuple[str, str]:
+        """
+        从响应中提取 think 过程和实际内容
+        
+        Returns:
+            (think_content, actual_content) 元组
+        """
+        content = completion.choices[0].message.content or ""
+        
+        # DeepSeek 的 think 过程可能在多种标签中
+        think_patterns = [
+            (r'<think>(.*?)</think>', re.DOTALL),
+            (r'<think>(.*?)</think>', re.DOTALL),
+            (r'<reasoning>(.*?)</reasoning>', re.DOTALL),
+            (r'<thought>(.*?)</thought>', re.DOTALL),
+            (r'<thinking>(.*?)</thinking>', re.DOTALL),
+        ]
+        
+        think_content = ""
+        actual_content = content
+        
+        for pattern, flags in think_patterns:
+            matches = re.findall(pattern, content, flags)
+            if matches:
+                think_content = "\n\n".join(matches)
+                # 移除 think 标签，保留实际内容
+                actual_content = re.sub(pattern, '', content, flags=flags).strip()
+                break
+        
+        # 如果没有找到标签，检查是否有其他格式的思考过程
+        if not think_content and "思考" in content[:100]:
+            # 尝试提取思考部分
+            lines = content.split('\n')
+            think_lines = []
+            content_lines = []
+            in_think = False
+            
+            for line in lines:
+                if any(keyword in line for keyword in ["思考", "分析", "考虑", "推理"]):
+                    in_think = True
+                if in_think and line.strip():
+                    think_lines.append(line)
+                else:
+                    content_lines.append(line)
+                    in_think = False
+            
+            if think_lines:
+                think_content = '\n'.join(think_lines)
+                actual_content = '\n'.join(content_lines).strip()
+        
+        return think_content, actual_content
+    
     async def get_stream_content(self, stream: AsyncIterator[ChatCompletionChunk]) -> AsyncIterator[str]:
         """从流式响应中提取内容"""
         async for chunk in stream:
@@ -208,13 +260,18 @@ class LLMClientFactory:
         )
     
     @staticmethod
-    def create_cloud_siliconflow(api_key: str = None, model: str = "deepseek-chat") -> LLMClient:
-        """创建 SiliconFlow 云端客户端"""
+    def create_cloud_siliconflow(api_key: str = None, model: str = None) -> LLMClient:
+        """创建 SiliconFlow 云端客户端（硅基流动）"""
         if api_key is None:
             api_key = os.getenv("SILICONFLOW_API_KEY", "")
+        if model is None:
+            # 默认使用 DeepSeek-V3.2，可通过环境变量 SILICONFLOW_MODEL 覆盖
+            model = os.getenv("SILICONFLOW_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2")
         return LLMClient(
             base_url="https://api.siliconflow.cn/v1",
             api_key=api_key,
-            model=model
+            model=model,
+            temperature=0.7,
+            max_tokens=4096
         )
 
