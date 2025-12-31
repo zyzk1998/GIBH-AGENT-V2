@@ -51,6 +51,7 @@ class ScanpyTool:
         
         # 工具映射表：将 tool_id 映射到具体的处理函数
         self.tool_map = {
+            "inspect_file": self.inspect_file,  # 数据检查工具
             "local_qc": self.step_qc,
             "local_normalize": self.step_normalize,
             "local_hvg": self.step_hvg,
@@ -127,6 +128,116 @@ class ScanpyTool:
         else:
             adata = sc.read(data_input)
         return adata
+    
+    # ================= 🔍 数据检查工具 =================
+    
+    def inspect_file(self, file_path: str) -> Dict[str, Any]:
+        """
+        检查文件内容，返回数据摘要
+        
+        这是一个强制性的检查步骤，必须在执行任何分析之前调用。
+        
+        Args:
+            file_path: 数据文件路径（.h5ad 文件或 10x 目录）
+        
+        Returns:
+            包含数据摘要的字典：
+            - n_obs: 细胞数量
+            - n_vars: 基因数量
+            - obs_keys: .obs 中的列名列表
+            - var_keys: .var 中的列名列表
+            - is_normalized: 是否已标准化（基于最大值猜测）
+            - max_value: 数据最大值
+            - min_value: 数据最小值
+            - preview: .obs 的前5行预览
+            - has_clusters: 是否已有聚类结果
+            - has_umap: 是否已有 UMAP 坐标
+        """
+        try:
+            # 高效加载：使用 backed='r' 模式只读取元数据，不加载全部数据到内存
+            if file_path.endswith('.h5ad'):
+                try:
+                    # 尝试使用 backed 模式（只读模式，不加载全部数据）
+                    adata = sc.read_h5ad(file_path, backed='r')
+                except:
+                    # 如果 backed 模式失败，使用普通模式
+                    adata = sc.read_h5ad(file_path)
+            elif os.path.isdir(file_path):
+                # 10x 格式需要完整加载
+                adata = self.load_data(file_path)
+            else:
+                adata = sc.read(file_path)
+            
+            # 提取基本信息
+            n_obs = adata.n_obs
+            n_vars = adata.n_vars
+            obs_keys = list(adata.obs.columns) if hasattr(adata.obs, 'columns') else []
+            var_keys = list(adata.var.columns) if hasattr(adata.var, 'columns') else []
+            
+            # 检查数据值范围（用于判断是否已标准化）
+            # 只检查一个小样本以提高效率
+            import numpy as np
+            sample_size = min(1000, adata.n_obs * adata.n_vars)
+            if sample_size > 0:
+                # 随机采样检查
+                if hasattr(adata.X, 'toarray'):
+                    # 稀疏矩阵
+                    sample_data = adata.X[:min(100, adata.n_obs), :min(100, adata.n_vars)]
+                    if hasattr(sample_data, 'toarray'):
+                        sample_data = sample_data.toarray()
+                    else:
+                        sample_data = np.array(sample_data)
+                else:
+                    sample_data = np.array(adata.X[:min(100, adata.n_obs), :min(100, adata.n_vars)])
+                
+                max_value = float(np.nanmax(sample_data)) if sample_data.size > 0 else 0.0
+                min_value = float(np.nanmin(sample_data)) if sample_data.size > 0 else 0.0
+            else:
+                max_value = 0.0
+                min_value = 0.0
+            
+            # 判断是否已标准化
+            # 经验规则：如果最大值 < 20，可能是 log-transformed；如果最大值很大（>1000），可能是原始 counts
+            is_normalized = max_value < 20 if max_value > 0 else False
+            
+            # 预览 .obs 的前5行
+            preview = None
+            if n_obs > 0:
+                try:
+                    preview_df = adata.obs.head(5)
+                    preview = preview_df.to_dict('records') if hasattr(preview_df, 'to_dict') else str(preview_df)
+                except:
+                    preview = "无法生成预览"
+            
+            # 检查是否已有分析结果
+            has_clusters = 'leiden' in adata.obs.columns or 'louvain' in adata.obs.columns
+            has_umap = 'X_umap' in adata.obsm_keys() if hasattr(adata, 'obsm_keys') else False
+            
+            # 检查是否有 QC 指标
+            has_qc_metrics = any(key in obs_keys for key in ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'])
+            
+            result = {
+                "n_obs": n_obs,
+                "n_vars": n_vars,
+                "obs_keys": obs_keys,
+                "var_keys": var_keys,
+                "is_normalized": is_normalized,
+                "max_value": max_value,
+                "min_value": min_value,
+                "preview": preview,
+                "has_clusters": has_clusters,
+                "has_umap": has_umap,
+                "has_qc_metrics": has_qc_metrics,
+                "file_path": file_path
+            }
+            
+            return result
+            
+        except Exception as e:
+            return {
+                "error": str(e),
+                "file_path": file_path
+            }
     
     # ================= 🔧 原子化工具函数 =================
     

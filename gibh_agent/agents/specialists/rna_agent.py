@@ -114,9 +114,32 @@ class RNAAgent(BaseAgent):
         query: str,
         file_paths: List[str]
     ) -> Dict[str, Any]:
-        """生成工作流配置"""
-        # 使用 LLM 提取参数
-        extracted_params = await self._extract_workflow_params(query, file_paths)
+        """
+        生成工作流配置
+        
+        强制流程：
+        1. 先检查文件（inspect_file）
+        2. 基于检查结果提取参数
+        3. 生成工作流配置
+        """
+        # 强制检查：如果有文件，先检查
+        inspection_result = None
+        if file_paths:
+            input_path = file_paths[0]
+            try:
+                inspection_result = self.scanpy_tool.inspect_file(input_path)
+                if "error" in inspection_result:
+                    # 检查失败，但仍然继续（可能是文件路径问题）
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"File inspection failed: {inspection_result.get('error')}")
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error inspecting file: {e}", exc_info=True)
+        
+        # 使用 LLM 提取参数（传入检查结果）
+        extracted_params = await self._extract_workflow_params(query, file_paths, inspection_result)
         
         # 构建工作流配置
         workflow_config = {
@@ -156,22 +179,62 @@ class RNAAgent(BaseAgent):
     async def _extract_workflow_params(
         self,
         query: str,
-        file_paths: List[str]
+        file_paths: List[str],
+        inspection_result: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """使用 LLM 提取工作流参数"""
-        prompt = f"""Extract workflow parameters from user query:
+        """
+        使用 LLM 提取工作流参数
+        
+        基于检查结果智能推荐参数
+        """
+        # 构建包含检查结果的提示
+        inspection_info = ""
+        if inspection_result and "error" not in inspection_result:
+            inspection_info = f"""
+【Data Inspection Results】
+- Number of cells (n_obs): {inspection_result.get('n_obs', 'N/A')}
+- Number of genes (n_vars): {inspection_result.get('n_vars', 'N/A')}
+- Max value: {inspection_result.get('max_value', 'N/A')}
+- Is normalized: {inspection_result.get('is_normalized', False)}
+- Has QC metrics: {inspection_result.get('has_qc_metrics', False)}
+- Has clusters: {inspection_result.get('has_clusters', False)}
+- Has UMAP: {inspection_result.get('has_umap', False)}
+
+【Recommendations Based on Inspection】
+"""
+            n_obs = inspection_result.get('n_obs', 0)
+            is_normalized = inspection_result.get('is_normalized', False)
+            has_qc = inspection_result.get('has_qc_metrics', False)
+            
+            if n_obs > 10000:
+                inspection_info += "- Large dataset (>10k cells): Recommend min_genes=500, max_mt=5%\n"
+            elif n_obs > 5000:
+                inspection_info += "- Medium dataset (5k-10k cells): Recommend min_genes=300, max_mt=5%\n"
+            else:
+                inspection_info += "- Small dataset (<5k cells): Recommend min_genes=200, max_mt=10%\n"
+            
+            if is_normalized:
+                inspection_info += "- Data appears normalized: Skip normalization step\n"
+            else:
+                inspection_info += "- Data appears to be raw counts: Need normalization\n"
+            
+            if has_qc:
+                inspection_info += "- QC metrics already calculated: May skip QC calculation\n"
+        
+        prompt = f"""Extract workflow parameters from user query and inspection results:
 
 Query: {query}
 Files: {', '.join(file_paths) if file_paths else 'None'}
+{inspection_info}
 
-Extract these parameters (if mentioned):
-- min_genes (default: 200)
-- max_mt (default: 20)
-- resolution (default: 0.5)
-- n_top_genes (default: 2000)
+Extract these parameters (if mentioned in query, otherwise use recommendations):
+- min_genes (default: 200, adjust based on dataset size)
+- max_mt (default: 20, adjust based on dataset size)
+- resolution (default: 0.5, for clustering)
+- n_top_genes (default: 2000, for HVG selection)
 
 Return JSON only:
-{{"resolution": "0.8", "min_genes": "500"}}
+{{"resolution": "0.8", "min_genes": "500", "max_mt": "5"}}
 """
         
         messages = [
@@ -203,12 +266,71 @@ Return JSON only:
         query: str,
         file_paths: List[str]
     ) -> AsyncIterator[str]:
-        """流式聊天响应"""
+        """
+        流式聊天响应（支持 ReAct 循环和工具调用）
+        
+        实现 ReAct 循环：
+        1. Thought: LLM 思考
+        2. Action: 调用工具（如 inspect_file）
+        3. Observation: 工具返回结果
+        4. Final Answer: 最终回答
+        """
         context = {
-            "context": f"Uploaded files: {', '.join(file_paths) if file_paths else 'None'}"
+            "context": f"Uploaded files: {', '.join(file_paths) if file_paths else 'None'}",
+            "available_tools": ["inspect_file"],
+            "tool_descriptions": {
+                "inspect_file": "检查数据文件，返回数据摘要（n_obs, n_vars, obs_keys, var_keys, is_normalized, etc.）"
+            }
         }
         
-        async for chunk in self.chat(query, context, stream=True):
+        # 如果有文件，强制先检查（符合 SOP）
+        inspection_result = None
+        if file_paths:
+            input_path = file_paths[0]
+            try:
+                inspection_result = self.scanpy_tool.inspect_file(input_path)
+                if "error" not in inspection_result:
+                    # 将检查结果添加到上下文中
+                    inspection_summary = f"""
+【Data Inspection Completed】
+- Cells: {inspection_result.get('n_obs', 'N/A')}
+- Genes: {inspection_result.get('n_vars', 'N/A')}
+- Max value: {inspection_result.get('max_value', 'N/A')}
+- Normalized: {inspection_result.get('is_normalized', False)}
+- Has QC metrics: {inspection_result.get('has_qc_metrics', False)}
+- Has clusters: {inspection_result.get('has_clusters', False)}
+"""
+                    # 先输出检查结果
+                    yield f"🔍 **Data Inspection Results:**\n{inspection_summary}\n\n"
+                    # 将检查结果添加到查询中，让 LLM 基于此分析
+                    query = f"""{query}
+
+{inspection_summary}
+
+Based on the inspection results above, please:
+1. Analyze the data characteristics
+2. Propose appropriate analysis parameters
+3. Ask for confirmation before proceeding with analysis
+"""
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error inspecting file: {e}", exc_info=True)
+                yield f"⚠️ Warning: Could not inspect file: {str(e)}\n\n"
+        
+        # 构建增强的用户查询，包含工具说明
+        enhanced_query = f"""{query}
+
+【Available Tools】
+You have access to: inspect_file(file_path) - already executed above if files were provided.
+
+【Workflow Rule】
+Before running any analysis, you MUST have inspected the data first (already done above).
+Now analyze the inspection results and propose parameters.
+"""
+        
+        # 流式输出 LLM 响应
+        async for chunk in self.chat(enhanced_query, context, stream=True):
             yield chunk
     
     async def execute_workflow(

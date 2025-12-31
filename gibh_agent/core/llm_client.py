@@ -7,6 +7,7 @@ from typing import Optional, AsyncIterator, Dict, Any
 from openai import OpenAI, AsyncOpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 import os
+import re
 
 
 class LLMClient:
@@ -164,10 +165,11 @@ class LLMClient:
         """
         content = completion.choices[0].message.content or ""
         
-        # DeepSeek 的 think 过程可能在多种标签中
+        # 优先解析标准 <think> 标签（我们的新协议）
+        # 然后支持其他变体（向后兼容）
         think_patterns = [
-            (r'<think>(.*?)</think>', re.DOTALL),
-            (r'<think>(.*?)</think>', re.DOTALL),
+            (r'<think>(.*?)</think>', re.DOTALL),  # 标准格式（优先）
+            (r'<think>(.*?)</think>', re.DOTALL),  # 向后兼容
             (r'<reasoning>(.*?)</reasoning>', re.DOTALL),
             (r'<thought>(.*?)</thought>', re.DOTALL),
             (r'<thinking>(.*?)</thinking>', re.DOTALL),
