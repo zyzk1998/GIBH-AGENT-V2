@@ -36,8 +36,14 @@ class ScanpyTool:
     参考旧版本：/home/ubuntu/GIBH-AGENT/services/api/src/scrna_analysis.py
     """
     
-    def __init__(self, config: Dict[str, Any] = None):
-        """初始化 Scanpy 工具"""
+    def __init__(self, config: Dict[str, Any] = None, cellranger_tool=None):
+        """
+        初始化 Scanpy 工具
+        
+        Args:
+            config: 配置字典
+            cellranger_tool: CellRangerTool 实例（可选，用于运行 Cell Ranger）
+        """
         self.config = config or {}
         # 使用相对路径，避免权限问题
         default_output = os.path.join(os.getcwd(), "results")
@@ -49,9 +55,14 @@ class ScanpyTool:
             self.output_dir = os.path.join(os.getcwd(), "results")
             os.makedirs(self.output_dir, exist_ok=True)
         
+        # Cell Ranger 工具（可选）
+        self.cellranger_tool = cellranger_tool
+        
         # 工具映射表：将 tool_id 映射到具体的处理函数
         self.tool_map = {
             "inspect_file": self.inspect_file,  # 数据检查工具
+            "run_cellranger": self.run_cellranger,  # Cell Ranger 计数
+            "convert_cellranger_to_h5ad": self.convert_cellranger_to_h5ad,  # 转换 Cell Ranger 输出
             "local_qc": self.step_qc,
             "local_normalize": self.step_normalize,
             "local_hvg": self.step_hvg,
@@ -344,6 +355,124 @@ class ScanpyTool:
             "summary": "Marker 基因鉴定完成",
             "details": markers_df.to_html(classes="table table-sm", index=False)
         }
+    
+    # ================= 🔬 Cell Ranger 工具 =================
+    
+    def run_cellranger(
+        self,
+        fastq_dir: str,
+        sample_id: str,
+        output_dir: str,
+        reference: Optional[str] = None,
+        sample: Optional[str] = None,
+        localcores: int = 8,
+        localmem: int = 32,
+        create_bam: bool = False,
+        expect_cells: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        运行 Cell Ranger count
+        
+        Args:
+            fastq_dir: FASTQ 文件目录路径
+            sample_id: 样本 ID
+            output_dir: 输出目录路径
+            reference: 参考基因组路径（可选）
+            sample: 样本名称（可选）
+            localcores: CPU 核心数
+            localmem: 内存（GB）
+            create_bam: 是否创建 BAM 文件
+            expect_cells: 预期细胞数（可选）
+        
+        Returns:
+            执行结果字典
+        """
+        if not self.cellranger_tool:
+            return {
+                "status": "error",
+                "error": "CellRangerTool not initialized. Please provide cellranger_tool in ScanpyTool.__init__()",
+                "output_dir": None,
+                "matrix_dir": None
+            }
+        
+        return self.cellranger_tool.run_count(
+            fastq_dir=fastq_dir,
+            sample_id=sample_id,
+            output_dir=output_dir,
+            reference=reference,
+            sample=sample,
+            localcores=localcores,
+            localmem=localmem,
+            create_bam=create_bam,
+            expect_cells=expect_cells
+        )
+    
+    def convert_cellranger_to_h5ad(
+        self,
+        cellranger_matrix_dir: str,
+        output_h5ad_path: str
+    ) -> Dict[str, Any]:
+        """
+        将 Cell Ranger 输出转换为 .h5ad 格式
+        
+        Args:
+            cellranger_matrix_dir: Cell Ranger 矩阵目录路径（filtered_feature_bc_matrix）
+            output_h5ad_path: 输出的 .h5ad 文件路径
+        
+        Returns:
+            转换结果字典，包含：
+            - status: "success" 或 "error"
+            - output_path: 输出文件路径
+            - n_obs: 细胞数
+            - n_vars: 基因数
+            - error: 错误信息（如果有）
+        """
+        try:
+            print(f"📖 读取 Cell Ranger 输出: {cellranger_matrix_dir}")
+            
+            # 检查输入目录
+            if not os.path.exists(cellranger_matrix_dir):
+                return {
+                    "status": "error",
+                    "error": f"Cell Ranger matrix directory does not exist: {cellranger_matrix_dir}",
+                    "output_path": None,
+                    "n_obs": None,
+                    "n_vars": None
+                }
+            
+            # 读取 10x MTX 数据
+            adata = sc.read_10x_mtx(
+                cellranger_matrix_dir,
+                var_names='gene_symbols',  # 使用基因符号作为变量名
+                cache=True
+            )
+            
+            # 确保基因名唯一
+            adata.var_names_make_unique()
+            
+            # 保存为 .h5ad 格式
+            print(f"💾 保存为 .h5ad 格式: {output_h5ad_path}")
+            os.makedirs(os.path.dirname(output_h5ad_path), exist_ok=True)
+            adata.write(output_h5ad_path)
+            
+            file_size_mb = os.path.getsize(output_h5ad_path) / (1024 * 1024)
+            
+            return {
+                "status": "success",
+                "output_path": output_h5ad_path,
+                "n_obs": adata.n_obs,
+                "n_vars": adata.n_vars,
+                "matrix_type": type(adata.X).__name__,
+                "file_size_mb": round(file_size_mb, 2)
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": f"Failed to convert Cell Ranger output: {str(e)}",
+                "output_path": None,
+                "n_obs": None,
+                "n_vars": None
+            }
     
     # ================= 🚀 主调度器 =================
     def run_pipeline(

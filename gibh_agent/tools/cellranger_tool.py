@@ -1,17 +1,22 @@
 """
 Cell Ranger 工具
-只生成脚本，不执行数据处理
-智能体只处理文件路径，不处理二进制数据
+支持生成脚本和执行 Cell Ranger 分析
 """
+import os
+import subprocess
+import shutil
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 
 class CellRangerTool:
     """
-    Cell Ranger 脚本生成器
+    Cell Ranger 工具
     
-    核心原则：只生成脚本，不执行数据处理
+    支持：
+    1. 生成脚本
+    2. 执行 Cell Ranger count
+    3. 检测 FASTQ 文件结构
     """
     
     def __init__(self, config: Dict[str, Any] = None):
@@ -22,7 +27,27 @@ class CellRangerTool:
             config: 配置字典，包含 cellranger 路径、参考基因组等
         """
         self.config = config or {}
-        self.cellranger_path = self.config.get("path", "/opt/cellranger")
+        # 支持完整路径（如 /home/ubuntu/cellranger-10.0.0）或目录路径
+        cellranger_path = self.config.get("path", "/opt/cellranger")
+        if os.path.isfile(cellranger_path):
+            # 如果是文件路径，使用目录
+            self.cellranger_path = os.path.dirname(cellranger_path)
+        elif os.path.isdir(cellranger_path):
+            # 如果是目录，检查是否有 bin/cellranger
+            if os.path.exists(os.path.join(cellranger_path, "bin", "cellranger")):
+                self.cellranger_path = cellranger_path
+            else:
+                # 可能是旧版本，直接使用目录
+                self.cellranger_path = cellranger_path
+        else:
+            # 默认路径
+            self.cellranger_path = cellranger_path
+        
+        self.cellranger_bin = os.path.join(self.cellranger_path, "bin", "cellranger")
+        if not os.path.exists(self.cellranger_bin):
+            # 尝试旧版本路径
+            self.cellranger_bin = os.path.join(self.cellranger_path, "cellranger")
+        
         self.reference = self.config.get("reference", "/data/refdata-cellranger-GRCh38-3.0.0")
     
     def generate_count_script(
@@ -175,4 +200,139 @@ fi
             "has_index": has_i1,
             "files": [str(f) for f in fastq_files[:10]]  # 只返回前10个文件路径
         }
+    
+    def run_count(
+        self,
+        fastq_dir: str,
+        sample_id: str,
+        output_dir: str,
+        reference: Optional[str] = None,
+        sample: Optional[str] = None,
+        localcores: int = 8,
+        localmem: int = 32,
+        create_bam: bool = False,
+        expect_cells: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        执行 cellranger count
+        
+        Args:
+            fastq_dir: FASTQ 文件目录路径
+            sample_id: 样本 ID（也是输出目录名）
+            output_dir: 最终输出目录路径
+            reference: 参考基因组路径（可选）
+            sample: 样本名称（从 FASTQ 文件名提取，可选）
+            localcores: 本地核心数
+            localmem: 本地内存（GB）
+            create_bam: 是否创建 BAM 文件（Cell Ranger 10.0.0+ 必需参数）
+            expect_cells: 预期细胞数（可选）
+        
+        Returns:
+            执行结果字典，包含：
+            - status: "success" 或 "error"
+            - output_dir: 输出目录路径
+            - matrix_dir: 矩阵目录路径（用于后续转换）
+            - error: 错误信息（如果有）
+        """
+        reference = reference or self.reference
+        
+        # 检查 Cell Ranger 是否存在
+        if not os.path.exists(self.cellranger_bin):
+            return {
+                "status": "error",
+                "error": f"Cell Ranger not found at: {self.cellranger_bin}",
+                "output_dir": None,
+                "matrix_dir": None
+            }
+        
+        # 检查 FASTQ 目录
+        if not os.path.exists(fastq_dir):
+            return {
+                "status": "error",
+                "error": f"FASTQ directory does not exist: {fastq_dir}",
+                "output_dir": None,
+                "matrix_dir": None
+            }
+        
+        # 检查参考基因组
+        if not os.path.exists(reference):
+            return {
+                "status": "error",
+                "error": f"Reference genome does not exist: {reference}",
+                "output_dir": None,
+                "matrix_dir": None
+            }
+        
+        # 构建命令
+        cmd = [
+            self.cellranger_bin,
+            "count",
+            "--id", sample_id,
+            "--create-bam", "true" if create_bam else "false",
+            "--transcriptome", reference,
+            "--fastqs", fastq_dir,
+            "--localcores", str(localcores),
+            "--localmem", str(localmem)
+        ]
+        
+        # 添加可选参数
+        if sample:
+            cmd.extend(["--sample", sample])
+        if expect_cells:
+            cmd.extend(["--expect-cells", str(expect_cells)])
+        
+        # 设置环境变量
+        env = os.environ.copy()
+        env["PATH"] = f"{self.cellranger_path}/bin:{env.get('PATH', '')}"
+        
+        try:
+            # 执行命令
+            print(f"🚀 Running Cell Ranger count...")
+            print(f"   Command: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                cwd=os.path.dirname(output_dir) if os.path.dirname(output_dir) else os.getcwd(),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            # 检查输出目录
+            output_path = os.path.join(os.path.dirname(output_dir) if os.path.dirname(output_dir) else os.getcwd(), sample_id, "outs")
+            matrix_dir = os.path.join(output_path, "filtered_feature_bc_matrix")
+            
+            if result.returncode == 0 and os.path.exists(matrix_dir):
+                # 如果指定了输出目录，移动结果
+                if output_dir != os.path.dirname(output_path):
+                    os.makedirs(output_dir, exist_ok=True)
+                    if os.path.exists(output_dir):
+                        shutil.rmtree(output_dir)
+                    shutil.move(output_path, output_dir)
+                    matrix_dir = os.path.join(output_dir, "filtered_feature_bc_matrix")
+                
+                return {
+                    "status": "success",
+                    "output_dir": output_dir if output_dir != os.path.dirname(output_path) else output_path,
+                    "matrix_dir": matrix_dir,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr
+                }
+            else:
+                return {
+                    "status": "error",
+                    "error": f"Cell Ranger count failed with return code {result.returncode}",
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "output_dir": None,
+                    "matrix_dir": None
+                }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": f"Exception while running Cell Ranger: {str(e)}",
+                "output_dir": None,
+                "matrix_dir": None
+            }
 

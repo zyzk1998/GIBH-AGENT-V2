@@ -159,11 +159,33 @@ class BaseAgent(ABC):
         检测文件类型
         
         Args:
-            file_path: 文件路径
+            file_path: 文件路径或目录路径
         
         Returns:
-            文件类型（如 "fastq", "bam", "h5ad"）
+            文件类型（如 "fastq", "bam", "h5ad", "10x_mtx"）
         """
+        import os
+        
+        # 如果是目录，检查是否是 FASTQ 目录或 10x MTX 目录
+        if os.path.isdir(file_path):
+            # 检查是否是 FASTQ 目录（包含 .fastq 或 .fq 文件）
+            fastq_files = [f for f in os.listdir(file_path) if f.endswith(('.fastq', '.fq', '.fastq.gz', '.fq.gz'))]
+            if fastq_files:
+                return "fastq"
+            
+            # 检查是否是 10x MTX 目录（包含 matrix.mtx 或 matrix.mtx.gz）
+            mtx_files = [f for f in os.listdir(file_path) if 'matrix.mtx' in f.lower()]
+            if mtx_files:
+                return "10x_mtx"
+            
+            # 检查是否是 Cell Ranger 输出目录（包含 filtered_feature_bc_matrix）
+            if 'filtered_feature_bc_matrix' in os.listdir(file_path) or \
+               any('filtered_feature_bc_matrix' in subdir for subdir in os.listdir(file_path) if os.path.isdir(os.path.join(file_path, subdir))):
+                return "10x_mtx"
+            
+            return "directory"
+        
+        # 如果是文件，检查扩展名
         ext = file_path.split('.')[-1].lower()
         
         type_mapping = {
@@ -174,7 +196,7 @@ class BaseAgent(ABC):
             "vcf": ["vcf"],
             "bed": ["bed"],
             "bw": ["bw", "bigwig"],
-            "bam": ["bam", "sam"]
+            "sam": ["sam"]
         }
         
         for file_type, extensions in type_mapping.items():

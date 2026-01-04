@@ -40,7 +40,8 @@ class RNAAgent(BaseAgent):
         self.cellranger_config = cellranger_config or {}
         self.scanpy_config = scanpy_config or {}
         self.cellranger_tool = CellRangerTool(self.cellranger_config)
-        self.scanpy_tool = ScanpyTool(self.scanpy_config)
+        # 将 cellranger_tool 传递给 scanpy_tool，使其可以使用 Cell Ranger 功能
+        self.scanpy_tool = ScanpyTool(self.scanpy_config, cellranger_tool=self.cellranger_tool)
         
         # 标准工作流步骤（十步流程）
         self.workflow_steps = [
@@ -277,9 +278,11 @@ Return JSON only:
         """
         context = {
             "context": f"Uploaded files: {', '.join(file_paths) if file_paths else 'None'}",
-            "available_tools": ["inspect_file"],
+            "available_tools": ["inspect_file", "run_cellranger", "convert_cellranger_to_h5ad"],
             "tool_descriptions": {
-                "inspect_file": "检查数据文件，返回数据摘要（n_obs, n_vars, obs_keys, var_keys, is_normalized, etc.）"
+                "inspect_file": "检查数据文件，返回数据摘要（n_obs, n_vars, obs_keys, var_keys, is_normalized, etc.）",
+                "run_cellranger": "运行 Cell Ranger count 对 FASTQ 文件进行计数分析",
+                "convert_cellranger_to_h5ad": "将 Cell Ranger 输出转换为 Scanpy 格式 (.h5ad)"
             }
         }
         
@@ -322,11 +325,16 @@ Based on the inspection results above, please:
         enhanced_query = f"""{query}
 
 【Available Tools】
-You have access to: inspect_file(file_path) - already executed above if files were provided.
+You have access to:
+- inspect_file(file_path): Check data file structure (already executed above if files were provided)
+- run_cellranger(fastq_dir, sample_id, output_dir, reference, ...): Run Cell Ranger count on FASTQ files
+- convert_cellranger_to_h5ad(matrix_dir, output_path): Convert Cell Ranger output to .h5ad format
 
 【Workflow Rule】
-Before running any analysis, you MUST have inspected the data first (already done above).
-Now analyze the inspection results and propose parameters.
+- If user provides FASTQ files: First run Cell Ranger, then convert to .h5ad, then inspect
+- If user provides .h5ad or 10x MTX files: Inspect first (already done above), then analyze and propose parameters
+- Before running any analysis, you MUST have inspected the data first
+- Now analyze the inspection results and propose parameters.
 """
         
         # 流式输出 LLM 响应
@@ -365,14 +373,68 @@ Now analyze the inspection results and propose parameters.
         
         # 更新 scanpy 工具的输出目录
         self.scanpy_config["output_dir"] = output_dir
-        # 重新初始化 scanpy 工具以使用新的输出目录
-        self.scanpy_tool = ScanpyTool(self.scanpy_config)
+        # 重新初始化 scanpy 工具以使用新的输出目录（保留 cellranger_tool）
+        self.scanpy_tool = ScanpyTool(self.scanpy_config, cellranger_tool=self.cellranger_tool)
         
         # 直接执行 Scanpy 流程
+        convert_result = None
         if file_type == "fastq":
-            # 需要先运行 Cell Ranger（暂不支持，先跳过）
-            raise NotImplementedError("Cell Ranger preprocessing is not yet implemented")
-        else:
+            # 从 FASTQ 开始：先运行 Cell Ranger，然后转换，最后执行 Scanpy 分析
+            # 提取参数
+            fastq_dir = input_path
+            sample_id = os.path.basename(fastq_dir).replace("_fastqs", "").replace("fastqs", "")
+            if not sample_id:
+                sample_id = "sample"
+            
+            # 创建临时输出目录
+            temp_output_dir = os.path.join(output_dir, "cellranger_output")
+            os.makedirs(temp_output_dir, exist_ok=True)
+            
+            # 运行 Cell Ranger
+            cellranger_result = self.scanpy_tool.run_cellranger(
+                fastq_dir=fastq_dir,
+                sample_id=sample_id,
+                output_dir=temp_output_dir,
+                localcores=self.cellranger_config.get("localcores", 8),
+                localmem=self.cellranger_config.get("localmem", 32),
+                create_bam=self.cellranger_config.get("create_bam", False)
+            )
+            
+            if cellranger_result.get("status") != "success":
+                return {
+                    "status": "error",
+                    "error": f"Cell Ranger failed: {cellranger_result.get('error', 'Unknown error')}",
+                    "cellranger_result": cellranger_result
+                }
+            
+            # 转换 Cell Ranger 输出为 .h5ad
+            matrix_dir = cellranger_result.get("matrix_dir")
+            if not matrix_dir:
+                return {
+                    "status": "error",
+                    "error": "Cell Ranger output matrix directory not found",
+                    "cellranger_result": cellranger_result
+                }
+            
+            h5ad_path = os.path.join(output_dir, f"{sample_id}_filtered.h5ad")
+            convert_result = self.scanpy_tool.convert_cellranger_to_h5ad(
+                cellranger_matrix_dir=matrix_dir,
+                output_h5ad_path=h5ad_path
+            )
+            
+            if convert_result.get("status") != "success":
+                return {
+                    "status": "error",
+                    "error": f"Conversion failed: {convert_result.get('error', 'Unknown error')}",
+                    "cellranger_result": cellranger_result,
+                    "convert_result": convert_result
+                }
+            
+            # 使用转换后的 .h5ad 文件继续执行 Scanpy 分析
+            input_path = h5ad_path
+        
+        # 执行 Scanpy 分析流程
+        if file_type != "fastq" or (file_type == "fastq" and convert_result and convert_result.get("status") == "success"):
             # 直接运行 Scanpy 分析
             steps = workflow_config.get("steps", [])
             
@@ -382,5 +444,21 @@ Now analyze the inspection results and propose parameters.
                 steps_config=steps
             )
             
+            # 如果是从 FASTQ 转换来的，添加转换信息到报告
+            if file_type == "fastq" and convert_result:
+                report["cellranger_result"] = {
+                    "status": "success",
+                    "converted_file": convert_result.get("output_path"),
+                    "n_obs": convert_result.get("n_obs"),
+                    "n_vars": convert_result.get("n_vars")
+                }
+            
             return report
+        else:
+            # 如果 FASTQ 处理失败，返回错误
+            return {
+                "status": "error",
+                "error": "Failed to process FASTQ files",
+                "convert_result": convert_result
+            }
 

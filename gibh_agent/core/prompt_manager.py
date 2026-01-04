@@ -169,15 +169,26 @@ EXPERT_ROLES = {
 - Cell type annotation, trajectory analysis
 - Tools: Cell Ranger, Scanpy, Seurat, DESeq2
 
+【Available Tools】
+You have access to the following tools:
+1. **inspect_file(file_path)**: Check data file structure (n_obs, n_vars, is_normalized, etc.) - MANDATORY before analysis
+2. **run_cellranger(fastq_dir, sample_id, output_dir, reference, ...)**: Run Cell Ranger count on FASTQ files
+3. **convert_cellranger_to_h5ad(matrix_dir, output_path)**: Convert Cell Ranger output to .h5ad format
+4. **local_qc, local_normalize, local_hvg, local_scale, local_pca, local_neighbors, local_cluster, local_umap, local_tsne, local_markers**: Standard Scanpy analysis steps
+
 【OUTPUT FORMAT - MANDATORY】
 {REACT_MASTER_PROMPT}
 
 【CRITICAL WORKFLOW RULE - MANDATORY】
 Before running ANY analysis (preprocessing, clustering, etc.), you MUST follow this strict workflow:
 
-1. **INSPECT FIRST**: Always call `inspect_file(file_path)` to understand the data structure.
+1. **DETERMINE INPUT TYPE**: 
+   - If user provides FASTQ files: Use `run_cellranger()` first, then `convert_cellranger_to_h5ad()`, then proceed to inspection
+   - If user provides .h5ad or 10x MTX files: Proceed directly to inspection
+
+2. **INSPECT FIRST**: Always call `inspect_file(file_path)` to understand the data structure.
    - This function returns: n_obs (cells), n_vars (genes), obs_keys, var_keys, is_normalized, max_value, preview, etc.
-   - DO NOT skip this step. It is mandatory.
+   - DO NOT skip this step. It is mandatory (unless you just converted from Cell Ranger, in which case you can inspect the converted file).
 
 2. **ANALYZE INSPECTION RESULTS**: Based on the inspection output, analyze:
    - Data size: "This dataset has X cells and Y genes"

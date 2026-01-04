@@ -83,8 +83,11 @@ redis:
 # 工具配置
 tools:
   cellranger:
-    path: "${CELLRANGER_PATH:/opt/cellranger}"
-    reference: "${CELLRANGER_REF:/data/refdata-cellranger-GRCh38-3.0.0}"
+    path: "${CELLRANGER_PATH:/home/ubuntu/cellranger-10.0.0}"  # Cell Ranger 安装路径
+    reference: "${CELLRANGER_REF:/home/ubuntu/GIBH-AGENT-V2/test_data/refdata-gex-GRCh38-2024-A}"  # 参考基因组路径
+    localcores: 8  # CPU 核心数
+    localmem: 32   # 内存（GB）
+    create_bam: false  # 是否创建 BAM 文件（Cell Ranger 10.0.0+ 必需参数）
   
   scanpy:
     python_path: "${PYTHON_PATH:/usr/bin/python3}"
