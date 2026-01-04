@@ -53,3 +53,28 @@ config/settings.local.yaml
 *.key
 *.pem
 
+# 测试数据目录（大文件，不提交）
+test_data/
+*.tar
+*.tar.gz
+*.fastq.gz
+*.fq.gz
+
+# SSH 密钥文件
+*.pub
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+GIBH-AGENT-V2
+GIBH-AGENT-V2.pub
+
+# 调试和临时文件
+.cursor/
+debug.log
+*.swp
+
