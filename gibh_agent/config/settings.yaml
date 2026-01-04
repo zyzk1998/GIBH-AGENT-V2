@@ -88,9 +88,13 @@ tools:
     localcores: 8  # CPU 核心数
     localmem: 32   # 内存（GB）
     create_bam: false  # 是否创建 BAM 文件（Cell Ranger 10.0.0+ 必需参数）
+  test_data_dir: "${TEST_DATA_DIR:test_data}"  # 测试数据目录
   
   scanpy:
     python_path: "${PYTHON_PATH:/usr/bin/python3}"
+  
+  metabolomics:
+    output_dir: "${METABOLOMICS_OUTPUT_DIR:results/metabolomics}"  # 代谢组学分析输出目录
   
   gatk:
     path: "${GATK_PATH:/opt/gatk}"

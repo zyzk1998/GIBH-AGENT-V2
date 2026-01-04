@@ -196,7 +196,8 @@ class BaseAgent(ABC):
             "vcf": ["vcf"],
             "bed": ["bed"],
             "bw": ["bw", "bigwig"],
-            "sam": ["sam"]
+            "sam": ["sam"],
+            "csv": ["csv"]  # 代谢组学数据通常使用 CSV 格式
         }
         
         for file_type, extensions in type_mapping.items():

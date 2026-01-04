@@ -153,12 +153,14 @@ class GIBHAgent:
         agents = {}
         
         # RNA Agent（转录组）
+        test_data_dir = self.config.get("tools", {}).get("test_data_dir", None)
         agents["rna_agent"] = RNAAgent(
             llm_client=self.llm_clients["logic"],
             prompt_manager=self.prompt_manager,
             dispatcher=self.dispatcher,
             cellranger_config=self.config.get("tools", {}).get("cellranger", {}),
-            scanpy_config=self.config.get("tools", {}).get("scanpy", {})
+            scanpy_config=self.config.get("tools", {}).get("scanpy", {}),
+            test_data_dir=test_data_dir
         )
         
         # DNA Agent（基因组）
@@ -175,7 +177,8 @@ class GIBHAgent:
         
         agents["metabolomics_agent"] = MetabolomicsAgent(
             llm_client=self.llm_clients["logic"],
-            prompt_manager=self.prompt_manager
+            prompt_manager=self.prompt_manager,
+            metabolomics_config=self.config.get("tools", {}).get("metabolomics", {})
         )
         
         agents["proteomics_agent"] = ProteomicsAgent(
@@ -199,7 +202,8 @@ class GIBHAgent:
         self,
         query: str,
         history: list = None,
-        uploaded_files: list = None
+        uploaded_files: list = None,
+        **kwargs
     ):
         """
         处理用户查询（主入口）
@@ -208,13 +212,20 @@ class GIBHAgent:
             query: 用户查询文本
             history: 对话历史
             uploaded_files: 上传的文件列表
+            **kwargs: 其他参数（如 test_dataset_id）将传递给目标智能体
         
         Returns:
             处理结果（可能是字典或异步生成器）
         """
         try:
             # 1. 路由到对应的领域智能体
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"🔀 开始路由决策: 查询='{query[:50]}...', 文件数={len(uploaded_files or [])}")
+            
             route_result = await self.router.process_query(query, history, uploaded_files)
+            
+            logger.info(f"✅ 路由完成: {route_result.get('routing')} (modality: {route_result.get('modality')}, confidence: {route_result.get('confidence', 0):.2f})")
             
             # 2. 获取目标智能体
             routing = route_result.get("routing", "rna_agent")
@@ -230,8 +241,8 @@ class GIBHAgent:
             if not target_agent:
                 raise ValueError("RNA Agent 未初始化")
             
-            # 3. 处理查询
-            result = await target_agent.process_query(query, history, uploaded_files)
+            # 3. 处理查询（传递所有 kwargs 给目标智能体）
+            result = await target_agent.process_query(query, history, uploaded_files, **kwargs)
             
             # 4. 添加路由信息
             result["routing_info"] = route_result

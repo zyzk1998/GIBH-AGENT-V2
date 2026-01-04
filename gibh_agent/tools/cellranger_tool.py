@@ -3,10 +3,14 @@ Cell Ranger 工具
 支持生成脚本和执行 Cell Ranger 分析
 """
 import os
+import sys
 import subprocess
 import shutil
+import logging
 from typing import Dict, Any, List, Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class CellRangerTool:
@@ -236,6 +240,11 @@ fi
         """
         reference = reference or self.reference
         
+        # 将所有路径转换为绝对路径，避免工作目录问题
+        fastq_dir = os.path.abspath(fastq_dir)
+        reference = os.path.abspath(reference)
+        output_dir = os.path.abspath(output_dir)
+        
         # 检查 Cell Ranger 是否存在
         if not os.path.exists(self.cellranger_bin):
             return {
@@ -263,7 +272,12 @@ fi
                 "matrix_dir": None
             }
         
-        # 构建命令
+        # 确定工作目录：Cell Ranger 会在当前目录创建 {sample_id} 文件夹
+        # 我们需要在输出目录的父目录运行，这样 {sample_id} 会创建在正确的位置
+        work_dir = os.path.dirname(output_dir) if os.path.dirname(output_dir) else os.getcwd()
+        work_dir = os.path.abspath(work_dir)  # 确保是绝对路径
+        
+        # 构建命令（使用绝对路径）
         cmd = [
             self.cellranger_bin,
             "count",
@@ -287,42 +301,99 @@ fi
         
         try:
             # 执行命令
+            logger.info("🚀 Running Cell Ranger count...")
+            logger.info(f"   Command: {' '.join(cmd)}")
+            logger.info(f"   Working directory: {work_dir}")
             print(f"🚀 Running Cell Ranger count...")
             print(f"   Command: {' '.join(cmd)}")
+            print(f"   Working directory: {work_dir}")
+            sys.stdout.flush()
             
-            result = subprocess.run(
+            # 实时输出日志：使用 Popen 而不是 run，以便实时捕获输出
+            process = subprocess.Popen(
                 cmd,
-                cwd=os.path.dirname(output_dir) if os.path.dirname(output_dir) else os.getcwd(),
+                cwd=work_dir,
                 env=env,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # 合并 stderr 到 stdout
                 text=True,
-                check=False
+                bufsize=1,  # 行缓冲
+                universal_newlines=True
             )
             
-            # 检查输出目录
-            output_path = os.path.join(os.path.dirname(output_dir) if os.path.dirname(output_dir) else os.getcwd(), sample_id, "outs")
+            # 实时读取并输出日志
+            stdout_lines = []
+            
+            # 从进程实时读取输出
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    line = output.strip()
+                    if line:  # 忽略空行
+                        stdout_lines.append(line)
+                        # 实时输出到终端和日志系统
+                        log_msg = f"[Cell Ranger] {line}"
+                        logger.info(log_msg)
+                        print(f"   {log_msg}")
+                        sys.stdout.flush()  # 确保立即输出
+            
+            # 等待进程完成
+            returncode = process.poll()
+            
+            # 构建完整的输出
+            stdout = '\n'.join(stdout_lines)
+            stderr = ''  # 已合并到 stdout
+            
+            # 创建类似 subprocess.run 的结果对象
+            class Result:
+                def __init__(self, returncode, stdout, stderr):
+                    self.returncode = returncode
+                    self.stdout = stdout
+                    self.stderr = stderr
+            
+            result = Result(returncode, stdout, stderr)
+            
+            # Cell Ranger 会在 work_dir 下创建 {sample_id} 目录
+            output_path = os.path.join(work_dir, sample_id, "outs")
             matrix_dir = os.path.join(output_path, "filtered_feature_bc_matrix")
             
             if result.returncode == 0 and os.path.exists(matrix_dir):
-                # 如果指定了输出目录，移动结果
-                if output_dir != os.path.dirname(output_path):
-                    os.makedirs(output_dir, exist_ok=True)
+                # Cell Ranger 在 work_dir 下创建了 {sample_id} 目录
+                # 如果指定的 output_dir 与创建的位置不同，需要移动结果
+                cellranger_output = os.path.join(work_dir, sample_id)
+                if os.path.abspath(output_dir) != os.path.abspath(cellranger_output):
+                    # 确保目标目录的父目录存在
+                    os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+                    # 如果目标目录已存在，先删除
                     if os.path.exists(output_dir):
                         shutil.rmtree(output_dir)
-                    shutil.move(output_path, output_dir)
-                    matrix_dir = os.path.join(output_dir, "filtered_feature_bc_matrix")
+                    # 移动整个 {sample_id} 目录到 output_dir
+                    shutil.move(cellranger_output, output_dir)
+                    matrix_dir = os.path.join(output_dir, "outs", "filtered_feature_bc_matrix")
+                else:
+                    # 如果位置相同，直接使用
+                    matrix_dir = os.path.join(output_dir, "outs", "filtered_feature_bc_matrix")
                 
                 return {
                     "status": "success",
-                    "output_dir": output_dir if output_dir != os.path.dirname(output_path) else output_path,
+                    "output_dir": output_dir,
                     "matrix_dir": matrix_dir,
                     "stdout": result.stdout,
                     "stderr": result.stderr
                 }
             else:
+                # 输出错误信息以便调试
+                error_msg = f"Cell Ranger count failed with return code {result.returncode}"
+                if result.stderr:
+                    error_msg += f"\nSTDERR: {result.stderr[:500]}"  # 只显示前500字符
+                if result.stdout:
+                    error_msg += f"\nSTDOUT: {result.stdout[:500]}"
+                
                 return {
                     "status": "error",
-                    "error": f"Cell Ranger count failed with return code {result.returncode}",
+                    "error": error_msg,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
                     "output_dir": None,
@@ -334,5 +405,5 @@ fi
                 "error": f"Exception while running Cell Ranger: {str(e)}",
                 "output_dir": None,
                 "matrix_dir": None
-            }
+        }
 

@@ -22,6 +22,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent))
 
 from gibh_agent import create_agent
+from gibh_agent.core.file_inspector import FileInspector
 
 # 配置日志
 logging.basicConfig(
@@ -51,6 +52,9 @@ UPLOAD_DIR = Path("uploads")
 RESULTS_DIR = Path("results")
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
+
+# 初始化文件检测器
+file_inspector = FileInspector(str(UPLOAD_DIR))
 
 # 添加静态文件服务（用于访问结果图片）
 from fastapi.staticfiles import StaticFiles
@@ -108,6 +112,7 @@ class ChatRequest(BaseModel):
     history: List[dict] = []
     uploaded_files: List[dict] = []
     workflow_data: Optional[dict] = None
+    test_dataset_id: Optional[str] = None
 
 
 # 日志缓冲区（用于实时日志流）
@@ -222,9 +227,12 @@ async def index():
             border-radius: 4px;
             padding: 15px;
             overflow-y: auto;
+            overflow-x: hidden;
             margin-bottom: 15px;
             background: #fafafa;
             min-height: 300px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
         }
         .log-area {
             flex: 1;
@@ -242,6 +250,11 @@ async def index():
             margin-bottom: 10px;
             padding: 8px;
             border-radius: 4px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-x: hidden;
         }
         .message.user {
             background: #e3f2fd;
@@ -298,9 +311,17 @@ async def index():
         }
         .analysis-result {
             background: #f1f8e9 !important;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-x: hidden;
         }
         .analysis-summary {
             padding: 15px;
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-x: hidden;
         }
         .analysis-summary h3 {
             margin-top: 0;
@@ -316,23 +337,64 @@ async def index():
         .analysis-summary ul {
             margin: 10px 0;
             padding-left: 20px;
+            max-width: 100%;
+            box-sizing: border-box;
         }
         .analysis-summary li {
             margin: 5px 0;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            max-width: 100%;
+        }
+        .qc-metrics, .steps-details, .visualization, .step-plots, .markers-table, .diagnosis {
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-x: hidden;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        .diagnosis div {
+            max-width: 100%;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: pre-wrap;
+        }
+        .visualization, .step-plots {
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-x: hidden;
         }
         .visualization img, .step-plots img {
             max-width: 100%;
+            height: auto;
             border: 1px solid #ddd;
             border-radius: 4px;
             margin: 10px 0;
+            display: block;
+        }
+        .step-plots > div {
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-x: hidden;
+            word-wrap: break-word;
         }
         .markers-table {
             overflow-x: auto;
+            max-width: 100%;
+            box-sizing: border-box;
+            margin: 10px 0;
         }
         .markers-table table {
             width: 100%;
+            max-width: 100%;
             border-collapse: collapse;
-            margin: 10px 0;
+            margin: 0;
+            table-layout: auto;
+        }
+        .markers-table th, .markers-table td {
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            max-width: 200px;
         }
         .markers-table th, .markers-table td {
             border: 1px solid #ddd;
@@ -401,6 +463,40 @@ async def index():
         }
         .status.connected { background: #4CAF50; color: white; }
         .status.disconnected { background: #f44336; color: white; }
+        .test-data-selection {
+            background: #f1f8e9 !important;
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-x: hidden;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        .test-data-selection h3 {
+            margin-top: 0;
+            color: #4CAF50;
+            word-wrap: break-word;
+        }
+        .test-data-selection div[onclick] {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            cursor: pointer;
+            transition: background 0.2s;
+            max-width: 100%;
+            box-sizing: border-box;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        .test-data-selection div[onclick]:hover {
+            background: #f5f5f5;
+            border-color: #4CAF50;
+        }
+        .dataset-card {
+            max-width: 100%;
+            box-sizing: border-box;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
     </style>
 </head>
 <body>
@@ -530,6 +626,7 @@ async def index():
                     let hasThinkBlock = false;
                     let finalAnswer = '';
                     let thinkStartIndex = -1;
+                    let datasetsJson = null;
                     
                     while (true) {
                         const { done, value } = await reader.read();
@@ -537,6 +634,18 @@ async def index():
                         
                         const chunk = decoder.decode(value);
                         fullText += chunk;
+                        
+                        // 检查是否包含数据集 JSON（测试数据选择响应）
+                        // 使用非贪婪匹配，但需要匹配多行（因为 JSON 可能跨行）
+                        const datasetsMatch = fullText.match(/<!-- DATASETS_JSON: (\[[\s\S]*?\]) -->/);
+                        if (datasetsMatch && !datasetsJson) {
+                            try {
+                                // JSON 中的换行符已被替换为空格，直接解析即可
+                                datasetsJson = JSON.parse(datasetsMatch[1]);
+                            } catch (e) {
+                                console.error('解析数据集JSON失败:', e, datasetsMatch[1].substring(0, 100));
+                            }
+                        }
                         
                         // 检测 think 开始标签（支持多种格式）
                         const thinkStartPatterns = [
@@ -550,12 +659,12 @@ async def index():
                         for (const pattern of thinkStartPatterns) {
                             const match = fullText.match(pattern);
                             if (match && !hasThinkBlock) {
-                                isThinking = true;
-                                hasThinkBlock = true;
+                            isThinking = true;
+                            hasThinkBlock = true;
                                 thinkStartIndex = match.index + match[0].length;
-                                // 创建 think 卡片
-                                if (!document.querySelector('.think-card:last-child .think-process')) {
-                                    createThinkCard();
+                            // 创建 think 卡片
+                            if (!document.querySelector('.think-card:last-child .think-process')) {
+                                createThinkCard();
                                 }
                                 break;
                             }
@@ -575,17 +684,17 @@ async def index():
                             if (match && isThinking) {
                                 // 提取 think 内容
                                 thinkBuffer = fullText.substring(thinkStartIndex, match.index);
-                                updateThinkContent(thinkBuffer);
-                                isThinking = false;
-                                
+                            updateThinkContent(thinkBuffer);
+                            isThinking = false;
+                            
                                 // 提取 think 标签之后的内容作为最终答案
                                 const afterThinkIndex = match.index + match[0].length;
                                 finalAnswer = fullText.substring(afterThinkIndex);
                                 if (finalAnswer.trim()) {
                                     updateLastMessage('assistant', finalAnswer.trim());
-                                }
-                                break;
                             }
+                                break;
+                        }
                         }
                         
                         // 更新显示
@@ -593,7 +702,7 @@ async def index():
                             // 在 think 块中，更新 think 内容
                             if (thinkStartIndex >= 0) {
                                 thinkBuffer = fullText.substring(thinkStartIndex);
-                                updateThinkContent(thinkBuffer);
+                            updateThinkContent(thinkBuffer);
                             }
                         } else if (hasThinkBlock && !isThinking) {
                             // think 块已结束，更新最终答案
@@ -602,7 +711,24 @@ async def index():
                             }
                         } else {
                             // 没有 think 块，直接更新消息
-                            updateLastMessage('assistant', fullText);
+                            // 在流式响应过程中，先显示文本内容（去除 JSON 注释）
+                            const cleanText = fullText.replace(/<!-- DATASETS_JSON: \[[\s\S]*?\] -->/g, '').trim();
+                            updateLastMessage('assistant', cleanText);
+                        }
+                    }
+                    
+                    // 流式响应结束后，如果检测到数据集信息，替换为选择界面
+                    if (datasetsJson && datasetsJson.length > 0) {
+                        // 移除 JSON 注释，只保留用户友好的文本
+                        const cleanText = fullText.replace(/<!-- DATASETS_JSON: \[[\s\S]*?\] -->/g, '').trim();
+                        // 移除之前的普通消息
+                        const lastMessage = chatArea.querySelector('.message.assistant:last-child');
+                        if (lastMessage && !lastMessage.classList.contains('test-data-selection')) {
+                            lastMessage.remove();
+                        }
+                        // 显示选择界面
+                        if (!document.querySelector('.test-data-selection')) {
+                            displayTestDataSelection(cleanText, datasetsJson);
                         }
                     }
                 }
@@ -683,7 +809,9 @@ async def index():
                 html += '<h4>📋 执行步骤</h4>';
                 html += '<ul>';
                 data.steps_details.forEach(step => {
-                    html += `<li><strong>${step.name || step.tool_id}</strong>: ${step.summary || '完成'}</li>`;
+                    const stepName = step.name || step.tool_id || '未知步骤';
+                    const stepSummary = step.summary || '完成';
+                    html += `<li><strong>${stepName}</strong>: ${stepSummary}</li>`;
                 });
                 html += '</ul>';
                 html += '</div>';
@@ -796,7 +924,7 @@ async def index():
                 <div class="think-process">
                     <div class="think-header" onclick="toggleThink(this)">
                         <span class="think-icon">🤔</span>
-                        <span class="think-title">DeepSeek 思考过程</span>
+                        <span class="think-title">思考过程</span>
                         <span class="think-toggle">▼</span>
                     </div>
                     <div class="think-content" style="display: none;"></div>
@@ -835,8 +963,114 @@ async def index():
             }
         }
         
+        // 显示测试数据选择界面
+        function displayTestDataSelection(messageText, datasets) {
+            const chatArea = document.getElementById('chatArea');
+            
+            // 检查是否已经显示过选择界面
+            const existing = document.querySelector('.test-data-selection');
+            if (existing) {
+                // 如果已存在，更新它而不是创建新的
+                return;
+            }
+            
+            // 移除之前的普通消息（如果有）
+            const lastMessage = chatArea.querySelector('.message.assistant:last-child');
+            if (lastMessage && !lastMessage.classList.contains('test-data-selection')) {
+                lastMessage.remove();
+            }
+            
+            const selectionDiv = document.createElement('div');
+            selectionDiv.className = 'message assistant test-data-selection';
+            
+            let html = '<div style="padding: 15px; max-width: 100%; box-sizing: border-box;">';
+            html += '<h3 style="margin-top: 0; color: #4CAF50; margin-bottom: 10px; word-wrap: break-word;">📊 选择测试数据集</h3>';
+            
+            // 显示消息文本（去除数据集列表部分）
+            const lines = messageText.split('\\n');
+            const messageLine = lines.find(line => line.includes('检测到') || line.includes('请选择'));
+            if (messageLine) {
+                html += '<p style="margin-bottom: 15px; color: #333; word-wrap: break-word; max-width: 100%;">' + messageLine + '</p>';
+            }
+            
+            // 显示数据集选择卡片
+            html += '<div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; max-width: 100%; box-sizing: border-box;">';
+            datasets.forEach(dataset => {
+                html += `<div class="dataset-card" 
+                             style="border: 2px solid #ddd; border-radius: 8px; padding: 15px; cursor: pointer; transition: all 0.2s; background: white; max-width: 100%; box-sizing: border-box; word-wrap: break-word; overflow-wrap: break-word;" 
+                             onmouseover="this.style.borderColor='#4CAF50'; this.style.boxShadow='0 2px 8px rgba(76,175,80,0.2)'" 
+                             onmouseout="this.style.borderColor='#ddd'; this.style.boxShadow='none'"
+                             onclick="selectTestDataset('${dataset.id}', '${dataset.name}')">`;
+                html += `<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px; max-width: 100%; flex-wrap: wrap;">`;
+                html += `<span style="font-size: 24px; flex-shrink: 0;">📦</span>`;
+                html += `<strong style="color: #4CAF50; font-size: 18px; word-wrap: break-word; flex: 1; min-width: 0;">${dataset.name}</strong>`;
+                html += `</div>`;
+                html += `<p style="margin: 0; color: #666; font-size: 14px; word-wrap: break-word; max-width: 100%;">${dataset.description}</p>`;
+                html += `<div style="margin-top: 8px; font-size: 12px; color: #999; word-wrap: break-word; max-width: 100%;">ID: <code style="word-break: break-all;">${dataset.id}</code></div>`;
+                html += '</div>';
+            });
+            html += '</div>';
+            
+            html += '<p style="margin-top: 10px; color: #666; font-size: 14px; font-style: italic; word-wrap: break-word; max-width: 100%;">💡 点击上面的数据集卡片选择，或上传您自己的数据文件。</p>';
+            html += '</div>';
+            
+            selectionDiv.innerHTML = html;
+            chatArea.appendChild(selectionDiv);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+        
+        // 选择测试数据集
+        async function selectTestDataset(datasetId, datasetName) {
+            addMessage('user', `使用测试数据集: ${datasetName} (${datasetId})`);
+            addMessage('assistant', `正在使用测试数据集 ${datasetName} 执行分析...`);
+            
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: `使用测试数据集 ${datasetId} 执行完整的单细胞转录组分析流程`,
+                        history: [],
+                        uploaded_files: [],
+                        test_dataset_id: datasetId
+                    })
+                });
+                
+                // 处理响应
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const data = await response.json();
+                    if (data.type === 'workflow_config') {
+                        addMessage('assistant', '🚀 开始执行分析流程...');
+                        await executeWorkflow(data.workflow_data, data.file_paths || []);
+                    } else {
+                        addMessage('assistant', JSON.stringify(data, null, 2));
+                    }
+                } else {
+                    // 流式响应
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let fullText = '';
+                    
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        const chunk = decoder.decode(value);
+                        fullText += chunk;
+                        updateLastMessage('assistant', fullText);
+                    }
+                }
+            } catch (error) {
+                addMessage('error', `❌ 错误: ${error.message}`);
+                console.error(error);
+            }
+        }
+        
         // 全局函数，供 HTML 调用
         window.toggleThink = toggleThink;
+        window.selectTestDataset = selectTestDataset;
 
         // 连接日志流
         function connectLogStream() {
@@ -942,12 +1176,22 @@ async def upload_file(file: UploadFile = File(...)):
         
         logger.info(f"✅ 文件保存成功: {file_path}")
         
+        # 🔥 主动检测：立即生成元数据
+        # 这样 Agent 在对话时就不用再读大文件了，直接读 meta.json
+        try:
+            metadata = file_inspector.generate_metadata(file.filename)
+            if metadata:
+                logger.info(f"📊 文件元数据已生成: {metadata.get('file_type', 'unknown')}")
+        except Exception as e:
+            logger.warning(f"⚠️ 生成文件元数据失败: {e}")
+        
         return {
             "status": "success",
             "file_id": file.filename,
             "file_name": file.filename,
             "file_path": str(file_path),
-            "file_size": len(content)
+            "file_size": len(content),
+            "metadata": metadata if 'metadata' in locals() else None
         }
     except Exception as e:
         logger.error(f"❌ 文件上传失败: {e}")
@@ -957,6 +1201,16 @@ async def upload_file(file: UploadFile = File(...)):
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
     """聊天接口"""
+    # #region debug log - entry point
+    import json
+    import traceback
+    try:
+        with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"server.py:1112","message":"chat_endpoint entry","data":{"agent_is_none":agent is None,"req_message":req.message[:100] if req.message else None},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"ENTRY"})+"\n")
+    except Exception as log_err:
+        pass  # 即使日志写入失败也不影响主流程
+    # #endregion
+    
     if not agent:
         error_msg = "智能体未初始化，请检查配置和日志。可能的原因：1) 配置文件路径错误 2) API Key未设置 3) 依赖包缺失"
         logger.error(error_msg)
@@ -993,21 +1247,122 @@ async def chat_endpoint(req: ChatRequest):
         logger.info(f"📂 处理文件: {[f['path'] for f in uploaded_files]}")
         
         # 处理查询
-        result = await agent.process_query(
-            query=req.message,
-            history=req.history,
-            uploaded_files=uploaded_files
-        )
+        # #region debug log
+        try:
+            with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"location":"server.py:1161","message":"Before process_query","data":{"query":req.message,"uploaded_files_count":len(uploaded_files),"test_dataset_id":req.test_dataset_id},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"A"})+"\n")
+        except Exception as log_err:
+            pass  # 日志写入失败不影响主流程
+        # #endregion
+        try:
+            result = await agent.process_query(
+                query=req.message,
+                history=req.history,
+                uploaded_files=uploaded_files,
+                test_dataset_id=req.test_dataset_id
+            )
+        except Exception as process_err:
+            # #region debug log
+            try:
+                with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({"location":"server.py:1156","message":"process_query exception","data":{"error_type":type(process_err).__name__,"error_message":str(process_err),"traceback":traceback.format_exc()},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"PROCESS_QUERY"})+"\n")
+            except:
+                pass
+            # #endregion
+            raise  # 重新抛出异常，让外层异常处理捕获
+        
+        # #region debug log
+        try:
+            with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"location":"server.py:1168","message":"After process_query","data":{"result_type":type(result).__name__,"result_keys":list(result.keys()) if isinstance(result,dict) else None,"result_type_value":result.get('type') if isinstance(result,dict) else None},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"A"})+"\n")
+        except:
+            pass
+        # #endregion
         
         logger.info(f"✅ 处理完成，返回类型: {result.get('type', 'unknown')}")
         
         # 如果是工作流配置，返回 JSON
         if result.get("type") == "workflow_config":
+            # 优先使用 result 中的 file_paths（可能来自测试数据集）
+            # 如果没有，则使用 uploaded_files
+            result_file_paths = result.get("file_paths", [])
+            if not result_file_paths:
+                result_file_paths = [f["path"] for f in uploaded_files]
             return JSONResponse(content={
                 "type": "workflow_config",
                 "workflow_data": result.get("workflow_data"),
-                "file_paths": [f["path"] for f in uploaded_files]
+                "file_paths": result_file_paths
             })
+        
+        # 如果是测试数据选择请求，格式化为用户友好的文本
+        if result.get("type") == "test_data_selection":
+            # #region debug log
+            import json
+            with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"location":"server.py:1178","message":"Entering test_data_selection handler","data":{"has_message":"message" in result,"has_options":"options" in result,"has_datasets_display":"datasets_display" in result,"has_datasets_json":"datasets_json" in result},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"B"})+"\n")
+            # #endregion
+            async def generate():
+                try:
+                    # #region debug log
+                    with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"location":"server.py:1181","message":"Inside generate()","data":{},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"C"})+"\n")
+                    # #endregion
+                    # 构建用户友好的消息
+                    message = result.get("message", "检测到您没有上传相关数据。请选择：")
+                    options = result.get("options", [])
+                    datasets_display = result.get("datasets_display", "")
+                    # #region debug log
+                    with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"location":"server.py:1187","message":"Before datasets_json processing","data":{"message_type":type(message).__name__,"options_type":type(options).__name__,"datasets_display_type":type(datasets_display).__name__,"datasets_display_len":len(str(datasets_display)) if datasets_display else 0},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
+                    # #endregion
+                    
+                    response_text = f"{message}\n\n"
+                    for option in options:
+                        response_text += f"  {option}\n"
+                    
+                    if datasets_display:
+                        response_text += f"\n{datasets_display}\n"
+                    
+                    response_text += "\n💡 提示：回复数据集ID（如：pbmc_1k_v3）或上传您自己的数据文件。\n"
+                    
+                    # 同时保存数据集信息到响应中（用于前端处理）
+                    # 这里我们通过特殊标记来传递 JSON 数据
+                    # 将 JSON 中的换行符替换为空格，避免破坏 HTML 注释
+                    datasets_json_raw = result.get('datasets_json', '[]')
+                    # #region debug log
+                    with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"location":"server.py:1200","message":"Before datasets_json replace","data":{"datasets_json_type":type(datasets_json_raw).__name__,"datasets_json_is_none":datasets_json_raw is None,"datasets_json_len":len(str(datasets_json_raw)) if datasets_json_raw else 0},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"B"})+"\n")
+                    # #endregion
+                    datasets_json = str(datasets_json_raw).replace('\n', ' ').replace('\r', '') if datasets_json_raw else '[]'
+                    # #region debug log
+                    with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"location":"server.py:1203","message":"After datasets_json replace","data":{"datasets_json_len":len(datasets_json),"response_text_len":len(response_text)},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"B"})+"\n")
+                    # #endregion
+                    response_text += f"\n<!-- DATASETS_JSON: {datasets_json} -->\n"
+                    
+                    # #region debug log
+                    with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"location":"server.py:1207","message":"Before yield","data":{"final_response_text_len":len(response_text)},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"C"})+"\n")
+                    # #endregion
+                    yield response_text
+                    # #region debug log
+                    with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"location":"server.py:1209","message":"After yield","data":{},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"C"})+"\n")
+                    # #endregion
+                except Exception as e:
+                    # #region debug log
+                    import traceback
+                    with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"location":"server.py:1212","message":"Exception in generate()","data":{"error_type":type(e).__name__,"error_message":str(e),"traceback":traceback.format_exc()},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"C"})+"\n")
+                    # #endregion
+                    logger.error(f"❌ 格式化测试数据选择响应错误: {e}", exc_info=True)
+                    yield f"\n\n❌ 错误: {str(e)}"
+            
+            # #region debug log
+            with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"location":"server.py:1218","message":"Before StreamingResponse","data":{},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"E"})+"\n")
+            # #endregion
+            return StreamingResponse(generate(), media_type="text/plain")
         
         # 如果是聊天响应，返回流式
         if result.get("type") == "chat":
@@ -1027,9 +1382,13 @@ async def chat_endpoint(req: ChatRequest):
         return JSONResponse(content=result)
         
     except Exception as e:
+        # #region debug log
+        import traceback
+        with open('/home/ubuntu/GIBH-AGENT-V2/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"location":"server.py:1210","message":"Exception in chat_endpoint","data":{"error_type":type(e).__name__,"error_message":str(e),"traceback":traceback.format_exc()},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"ALL"})+"\n")
+        # #endregion
         error_detail = f"{type(e).__name__}: {str(e)}"
         logger.error(f"❌ 处理失败: {error_detail}", exc_info=True)
-        import traceback
         logger.error(f"详细错误: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_detail)
 
@@ -1046,17 +1405,72 @@ async def execute_workflow(request: dict):
         
         logger.info(f"🚀 开始执行工作流: {len(file_paths)} 个文件")
         
-        # 获取 RNA Agent
-        rna_agent = agent.agents.get("rna_agent")
-        if not rna_agent:
-            raise HTTPException(status_code=500, detail="RNA Agent 未找到")
+        # 使用 RouterAgent 进行智能路由（而不是硬编码 if/else）
+        # 构建一个查询来让 RouterAgent 判断应该使用哪个 Agent
+        workflow_name = workflow_data.get("workflow_name", "")
+        
+        # 方法1: 如果有 workflow_name，使用它作为查询
+        if workflow_name:
+            route_query = workflow_name
+        # 方法2: 根据文件类型构建查询
+        elif file_paths:
+            file_path = file_paths[0]
+            file_ext = os.path.splitext(file_path)[1].lower()
+            if file_ext == ".csv":
+                route_query = "metabolomics analysis"
+            elif file_ext in [".h5ad", ".h5"]:
+                route_query = "single cell transcriptomics analysis"
+            elif "fastq" in file_path.lower():
+                route_query = "single cell RNA-seq analysis"
+            else:
+                route_query = "bioinformatics analysis"
+        else:
+            route_query = "bioinformatics analysis"
+        
+        # 准备上传文件列表（用于 RouterAgent）
+        uploaded_files_for_router = []
+        for file_path in file_paths:
+            uploaded_files_for_router.append({
+                "name": os.path.basename(file_path),
+                "path": file_path
+            })
+        
+        # 使用 RouterAgent 进行路由决策
+        try:
+            route_result = await agent.router.process_query(
+                query=route_query,
+                history=[],
+                uploaded_files=uploaded_files_for_router
+            )
+            
+            routing = route_result.get("routing", "rna_agent")
+            target_agent = agent.agents.get(routing)
+            
+            # 如果路由的智能体不存在，使用默认的 RNA Agent
+            if not target_agent:
+                logger.warning(f"⚠️ 路由的智能体不存在: {routing}，使用默认 rna_agent")
+                target_agent = agent.agents.get("rna_agent")
+                routing = "rna_agent"
+            
+            if not target_agent:
+                raise HTTPException(status_code=500, detail="RNA Agent 未找到")
+            
+            logger.info(f"✅ RouterAgent 路由结果: {routing} (confidence: {route_result.get('confidence', 0):.2f}, modality: {route_result.get('modality', 'unknown')})")
+            
+        except Exception as e:
+            logger.error(f"❌ RouterAgent 路由失败: {e}，使用默认 rna_agent", exc_info=True)
+            # 降级到默认 Agent
+            target_agent = agent.agents.get("rna_agent")
+            routing = "rna_agent"
+            if not target_agent:
+                raise HTTPException(status_code=500, detail="RNA Agent 未找到")
         
         # 设置输出目录
         output_dir = str(RESULTS_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         os.makedirs(output_dir, exist_ok=True)
         
         # 执行工作流
-        report = await rna_agent.execute_workflow(
+        report = await target_agent.execute_workflow(
             workflow_config=workflow_data,
             file_paths=file_paths,
             output_dir=output_dir
@@ -1101,8 +1515,21 @@ async def execute_workflow(request: dict):
         return JSONResponse(content=report)
         
     except Exception as e:
-        logger.error(f"❌ 工作流执行失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_detail = f"{type(e).__name__}: {str(e)}"
+        error_traceback = traceback.format_exc()
+        logger.error(f"❌ 工作流执行失败: {error_detail}", exc_info=True)
+        logger.error(f"详细错误: {error_traceback}")
+        # 返回更详细的错误信息
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error": error_detail,
+                "error_detail": error_traceback,
+                "message": f"工作流执行失败: {error_detail}"
+            }
+        )
 
 
 @app.get("/api/logs/stream")
@@ -1155,6 +1582,70 @@ async def get_logs(limit: int = 100):
         "logs": list(log_buffer)[-limit:],
         "total": len(log_buffer)
     })
+
+
+@app.get("/api/workflow/status/{run_id}")
+async def get_workflow_status(run_id: str):
+    """
+    查询工作流状态（兼容旧架构）
+    如果使用 Celery，查询 Celery 任务状态
+    如果使用同步执行，返回 not_found（因为同步执行没有任务ID）
+    """
+    try:
+        # 尝试从 Celery 查询任务状态
+        from celery.result import AsyncResult
+        from gibh_agent.core.celery_app import celery_app
+        
+        task_result = AsyncResult(run_id, app=celery_app)
+        
+        response = {
+            "status": "running",
+            "completed": False,
+            "steps_status": [],
+            "error": None
+        }
+        
+        if task_result.state == 'PENDING':
+            response["status"] = "running"
+        elif task_result.state == 'SUCCESS':
+            response["status"] = "success"
+            response["completed"] = True
+            result_data = task_result.result
+            if result_data:
+                response["report_data"] = result_data
+                if "steps_details" in result_data:
+                    response["steps_status"] = result_data["steps_details"]
+                elif "steps" in result_data:
+                    response["steps_status"] = result_data["steps"]
+        elif task_result.state == 'FAILURE':
+            response["status"] = "failed"
+            response["completed"] = True
+            response["error"] = str(task_result.result)
+        elif task_result.state == 'PROGRESS':
+            info = task_result.info
+            if isinstance(info, dict):
+                response["steps_status"] = info.get("steps", [])
+        
+        return JSONResponse(content=response)
+        
+    except ImportError:
+        # Celery 未安装或未配置，返回 not_found
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "not_found",
+                "message": "工作流状态查询需要 Celery 支持，当前使用同步执行模式"
+            }
+        )
+    except Exception as e:
+        logger.error(f"❌ 查询工作流状态失败: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error": str(e)
+            }
+        )
 
 
 if __name__ == "__main__":

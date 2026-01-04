@@ -1,0 +1,82 @@
+services:
+  # =========================================
+  # 1. 消息队列 - Redis
+  # =========================================
+  redis:
+    image: redis:7-alpine
+    container_name: gibh_v2_redis
+    restart: always
+    volumes:
+      - ./data/redis:/data
+    networks:
+      - gibh-network
+    command: redis-server --appendonly yes
+
+  # =========================================
+  # 2. API 服务器 - FastAPI + Gunicorn（直接暴露端口）
+  # =========================================
+  api-server:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    image: gibh-v2-api:latest
+    container_name: gibh_v2_api
+    restart: always
+    ports:
+      - "8028:8028"  # 直接暴露 API 服务器端口
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - UPLOAD_DIR=/app/uploads
+      - RESULTS_DIR=/app/results
+      - PYTHONPATH=/app
+      # LLM 配置（硅基流动 DeepSeek API）
+      - SILICONFLOW_API_KEY=sk-xgwvrxknbzbewlhkvlwenngtoppluiceipbglpgshyaxgjqc
+      - SILICONFLOW_MODEL=${SILICONFLOW_MODEL:-Pro/deepseek-ai/DeepSeek-V3.2}
+    volumes:
+      - .:/app
+      - ./data/uploads:/app/uploads
+      - ./results:/app/results
+      - ./data:/app/data
+    depends_on:
+      - redis
+    networks:
+      - gibh-network
+    command: gunicorn server:app -w 2 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8028 --timeout 300
+
+  # =========================================
+  # 3. 异步任务处理 - Celery Worker（可选）
+  # =========================================
+  worker:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    image: gibh-v2-api:latest
+    container_name: gibh_v2_worker
+    restart: always
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - UPLOAD_DIR=/app/uploads
+      - RESULTS_DIR=/app/results
+      - PYTHONPATH=/app
+      - SILICONFLOW_API_KEY=sk-xgwvrxknbzbewlhkvlwenngtoppluiceipbglpgshyaxgjqc
+      - SILICONFLOW_MODEL=${SILICONFLOW_MODEL:-Pro/deepseek-ai/DeepSeek-V3.2}
+    volumes:
+      - .:/app
+      - ./data/uploads:/app/uploads
+      - ./results:/app/results
+      - ./data:/app/data
+    depends_on:
+      - redis
+      - api-server
+    networks:
+      - gibh-network
+    command: celery -A gibh_agent.core.celery_app worker --loglevel=info --concurrency=4
+
+networks:
+  gibh-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
+

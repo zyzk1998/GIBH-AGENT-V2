@@ -72,7 +72,8 @@ class ScanpyTool:
             "local_cluster": self.step_cluster,
             "local_umap": self.step_umap,
             "local_tsne": self.step_tsne,
-            "local_markers": self.step_markers
+            "local_markers": self.step_markers,
+            "local_annotate": self.step_annotate
         }
     
     def _save_plot(self, name_prefix: str) -> str:
@@ -111,6 +112,17 @@ class ScanpyTool:
     def load_data(self, data_input: str):
         """加载单细胞数据"""
         print(f"📂 Loading data from: {data_input}")
+        
+        # 检查是否是 FASTQ 目录（不应该直接加载）
+        if os.path.isdir(data_input):
+            fastq_files = [f for f in os.listdir(data_input) if f.endswith(('.fastq', '.fq', '.fastq.gz', '.fq.gz'))]
+            if fastq_files:
+                raise ValueError(
+                    f"检测到 FASTQ 目录: {data_input}。"
+                    f"FASTQ 文件需要先通过 Cell Ranger 处理，不能直接加载。"
+                    f"请先运行 Cell Ranger count，然后转换输出为 .h5ad 格式。"
+                )
+        
         if os.path.isdir(data_input):
             try:
                 adata = sc.read_10x_mtx(data_input, var_names='gene_symbols', cache=False)
@@ -120,16 +132,25 @@ class ScanpyTool:
                 mtx_path = os.path.join(data_input, "matrix.mtx")
                 if not os.path.exists(mtx_path):
                     mtx_path = os.path.join(data_input, "matrix.mtx.gz")
+                if not os.path.exists(mtx_path):
+                    raise FileNotFoundError(
+                        f"无法在目录 {data_input} 中找到 matrix.mtx 文件。"
+                        f"这可能是 FASTQ 目录，需要先运行 Cell Ranger。"
+                    )
                 adata = sc.read_mtx(mtx_path).T
                 
                 genes_path = os.path.join(data_input, "features.tsv")
                 if not os.path.exists(genes_path):
                     genes_path = os.path.join(data_input, "genes.tsv")
+                if not os.path.exists(genes_path):
+                    raise FileNotFoundError(f"无法找到基因文件: {genes_path}")
                 genes = pd.read_csv(genes_path, header=None, sep='\t')
                 adata.var_names = genes[1].values
                 adata.var['gene_ids'] = genes[0].values
                 
                 barcodes_path = os.path.join(data_input, "barcodes.tsv")
+                if not os.path.exists(barcodes_path):
+                    raise FileNotFoundError(f"无法找到 barcodes 文件: {barcodes_path}")
                 barcodes = pd.read_csv(barcodes_path, header=None, sep='\t')
                 adata.obs_names = barcodes[0].values
             
@@ -356,6 +377,89 @@ class ScanpyTool:
             "details": markers_df.to_html(classes="table table-sm", index=False)
         }
     
+    def step_annotate(self, adata, params: Dict[str, Any]):
+        """步骤11: 细胞类型注释 (CellTypist)"""
+        try:
+            import celltypist
+            from celltypist import models
+        except ImportError:
+            return {
+                "summary": "错误: 未安装 celltypist",
+                "error": "请运行: pip install celltypist"
+            }
+        
+        # 模型缓存目录
+        cache_dir = Path(self.config.get("cache_dir", "test_data/cache"))
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        model_name = "Immune_All_Low.pkl"
+        model_path = cache_dir / model_name
+        
+        # 下载或加载模型
+        try:
+            if not model_path.exists():
+                print(f"📥 正在下载 CellTypist 模型: {model_name}")
+                models.download_models(model=model_name, folder=str(cache_dir))
+            
+            # 加载模型
+            model = celltypist.models.Model.load(str(model_path))
+            print(f"✅ 模型加载成功: {model_name}")
+            
+            # 运行注释
+            print("🔬 正在运行 CellTypist 注释...")
+            predictions = celltypist.annotate(
+                adata,
+                model=model,
+                majority_voting=True,
+                mode='probabilities'
+            )
+            
+            # 保存预测结果
+            adata.obs['predicted_labels'] = predictions.predicted_labels['majority_voting']
+            if 'predicted_labels' in predictions.predicted_labels.columns:
+                adata.obs['predicted_labels_prob'] = predictions.predicted_labels['predicted_labels']
+            
+            # 统计注释结果
+            label_counts = adata.obs['predicted_labels'].value_counts()
+            n_cell_types = len(label_counts)
+            
+            # 生成 UMAP 图（按预测标签着色）
+            if 'X_umap' in adata.obsm.keys():
+                fig, ax = plt.subplots(figsize=(10, 8))
+                sc.pl.umap(
+                    adata,
+                    color='predicted_labels',
+                    ax=ax,
+                    show=False,
+                    title="UMAP: Cell Type Annotation",
+                    legend_loc='right margin',
+                    frameon=False,
+                    legend_fontsize=8
+                )
+                plot_path = self._save_plot("umap_annotated")
+                
+                return {
+                    "summary": f"细胞类型注释完成: 识别到 {n_cell_types} 种细胞类型",
+                    "plot": plot_path,
+                    "cell_types": label_counts.to_dict(),
+                    "n_cell_types": n_cell_types
+                }
+            else:
+                return {
+                    "summary": f"细胞类型注释完成: 识别到 {n_cell_types} 种细胞类型（请先运行 UMAP）",
+                    "cell_types": label_counts.to_dict(),
+                    "n_cell_types": n_cell_types
+                }
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"CellTypist 注释失败: {str(e)}"
+            print(f"❌ {error_msg}")
+            print(traceback.format_exc())
+            return {
+                "summary": error_msg,
+                "error": str(e)
+            }
+    
     # ================= 🔬 Cell Ranger 工具 =================
     
     def run_cellranger(
@@ -472,7 +576,7 @@ class ScanpyTool:
                 "output_path": None,
                 "n_obs": None,
                 "n_vars": None
-            }
+        }
     
     # ================= 🚀 主调度器 =================
     def run_pipeline(

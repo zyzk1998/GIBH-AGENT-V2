@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GIBH Qwen Agent</title>
+    <!-- 核心库 -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <!-- 代码高亮样式 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/atom-one-dark.min.css">
+    
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <style>
+        /* ================= 全局变量 ================= */
+        :root {
+            --bg-color: #ffffff;
+            --chat-width: 800px;
+            --primary-color: #4d6bfe;
+            --text-color: #1f1f1f;
+            --thought-bg: #fcfcfc;
+            --thought-border: #f0f0f0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            margin: 0;
+            overflow: hidden;
+            color: var(--text-color);
+        }
+
+        /* ================= 导航栏 ================= */
+        .navbar {
+            background: rgba(255,255,255,0.9);
+            backdrop-filter: blur(10px);
+            position: absolute; top: 0; width: 100%; z-index: 10;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(0,0,0,0.03);
+        }
+        .brand-logo { font-weight: 600; font-size: 1.1rem; color: #333; display: flex; align-items: center; gap: 8px; }
+
+        /* ================= 聊天区域 ================= */
+        .chat-scroll-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 80px 20px 200px 20px;
+            scroll-behavior: smooth;
+        }
+        .chat-content { max-width: var(--chat-width); margin: 0 auto; }
+
+        /* 消息气泡 */
+        .message-row { display: flex; margin-bottom: 24px; animation: fadeIn 0.2s ease; }
+        .message-row.user { justify-content: flex-end; }
+        
+        .avatar {
+            width: 32px; height: 32px; border-radius: 6px; margin-right: 12px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; flex-shrink: 0; margin-top: 2px;
+        }
+        .avatar.ai { background: #eef2ff; color: var(--primary-color); }
+        
+        .message-container { max-width: 100%; flex: 1; min-width: 0; }
+        .message-row.user .message-container { flex: initial; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; }
+
+        .bubble { font-size: 15px; line-height: 1.6; color: #374151; position: relative; }
+        .message-row.user .bubble {
+            background-color: #f4f4f4;
+            color: #000;
+            padding: 8px 14px;
+            border-radius: 18px;
+            border-bottom-right-radius: 4px;
+            text-align: left;
+            display: inline-block;
+        }
+        .bubble p:last-child { margin-bottom: 0; }
+        
+        /* 📋 代码块增强样式 */
+        .code-block-wrapper {
+            margin: 10px 0;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #282c34;
+            border: 1px solid #3e4451;
+        }
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 12px;
+            background: #21252b;
+            color: #abb2bf;
+            font-size: 12px;
+            border-bottom: 1px solid #3e4451;
+        }
+        .copy-btn {
+            background: transparent;
+            border: none;
+            color: #abb2bf;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: color 0.2s;
+        }
+        .copy-btn:hover { color: #fff; }
+        .bubble pre { margin: 0; padding: 12px; overflow-x: auto; background: transparent; }
+        .bubble code { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 13px; }
+
+        /* 🧠 深度思考折叠卡片 */
+        .thought-process {
+            margin-bottom: 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            background-color: #f9fafb;
+            overflow: hidden;
+        }
+        .thought-summary {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            color: #6b7280;
+            display: flex;
+            align-items: center;
+            background: #f3f4f6;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        .thought-summary:hover { background: #e5e7eb; }
+        .thought-summary i { margin-right: 6px; color: #8b5cf6; }
+        .thought-content {
+            padding: 12px;
+            font-size: 13px;
+            color: #4b5563;
+            line-height: 1.6;
+            border-top: 1px solid #e5e7eb;
+            display: none;
+            white-space: pre-wrap;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            background: #ffffff;
+        }
+        .thought-content.open { display: block; animation: fadeIn 0.3s; }
+
+        /* ⏱️ 底部栏与计时器 */
+        .message-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 6px;
+            font-size: 11px;
+            color: #9ca3af;
+            padding: 0 2px;
+            height: 20px;
+        }
+        .generation-timer {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-family: monospace;
+            color: #6b7280;
+            background: #f3f4f6;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        /* 交互组件 */
+        .user-actions { display: flex; flex-direction: row; justify-content: flex-end; gap: 15px; margin-top: 6px; opacity: 0; transition: opacity 0.2s; padding-right: 4px; width: 100%; }
+        .message-row.user:hover .user-actions { opacity: 1; }
+        .action-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #9ca3af; cursor: pointer; transition: color 0.2s; white-space: nowrap; }
+        .action-item:hover { color: #4b5563; }
+
+        /* 🔍 图片灯箱 */
+        .lightbox {
+            display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.9); justify-content: center; align-items: center;
+        }
+        .lightbox img { max-width: 90%; max-height: 90%; border-radius: 4px; box-shadow: 0 0 20px rgba(255,255,255,0.1); }
+        .lightbox-close { position: absolute; top: 20px; right: 30px; color: #f1f1f1; font-size: 40px; font-weight: bold; cursor: pointer; }
+
+        /* 功能卡片样式 */
+        .params-form { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .form-label { font-size: 13px; font-weight: 600; color: #555; margin-bottom: 4px; }
+        .form-text { font-size: 12px; color: #999; }
+        .form-control, .form-select { font-size: 14px; border-radius: 6px; }
+        .btn-run { width: 100%; margin-top: 15px; font-weight: 600; }
+        
+        .accordion-button { padding: 10px 15px; font-size: 14px; font-weight: 600; }
+        .accordion-button:not(.collapsed) { background-color: #eef2ff; color: #4d6bfe; }
+        .accordion-body { padding: 15px; background: #fcfcfc; }
+
+        .workflow-monitor { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .step-item { display: flex; align-items: center; padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
+        .step-item:last-child { border-bottom: none; }
+        .step-icon { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 12px; font-size: 12px; flex-shrink: 0; }
+        .step-icon.pending { background: #f3f4f6; color: #9ca3af; }
+        .step-icon.running { background: #eef2ff; color: #4d6bfe; animation: pulse 1.5s infinite; }
+        .step-icon.success { background: #d1fae5; color: #059669; }
+        .step-icon.failed { background: #fee2e2; color: #dc2626; }
+        .step-name { font-size: 14px; font-weight: 500; color: #374151; flex: 1; }
+        .step-status-text { font-size: 12px; color: #6b7280; }
+
+        .data-selector-container { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; overflow: hidden; margin-top: 10px; }
+        .data-selector-header { padding: 12px 15px; background: #f9fafb; border-bottom: 1px solid #eee; font-weight: 600; color: #333; font-size: 14px; }
+        .data-selector-list { max-height: 300px; overflow-y: auto; padding: 5px 0; }
+        .dataset-item { display: flex; align-items: center; padding: 10px 15px; cursor: pointer; transition: background 0.2s; border-bottom: 1px solid #f9f9f9; }
+        .dataset-item:last-child { border-bottom: none; }
+        .dataset-item:hover { background: #f0f7ff; }
+        .dataset-item.selected { background: #eef2ff; border-left: 3px solid var(--primary-color); }
+        .dataset-item input { margin-right: 12px; transform: scale(1.2); cursor: pointer; }
+        .dataset-info { display: flex; flex-direction: column; pointer-events: none; } 
+        .dataset-name { font-size: 13px; font-weight: 500; color: #333; }
+        .dataset-meta { font-size: 11px; color: #999; margin-top: 2px; }
+        .data-selector-footer { padding: 10px 15px; border-top: 1px solid #eee; background: #fff; display: flex; justify-content: flex-end; }
+
+        .analysis-report { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .report-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .report-title { font-size: 16px; font-weight: 700; color: #333; }
+        .report-section { margin-top: 20px; }
+        .report-section h6 { font-weight: 600; color: #555; margin-bottom: 10px; }
+        .llm-diagnosis { background: #f0f7ff; border-left: 4px solid #4d6bfe; padding: 15px; border-radius: 4px; font-size: 14px; line-height: 1.6; color: #333; }
+
+        /* 打印样式 */
+        @media print {
+            @page { margin: 1cm; size: auto; }
+            body { background: white; -webkit-print-color-adjust: exact; }
+            
+            /* 隐藏无关元素 */
+            .navbar, .input-wrapper, .message-row.user, .avatar, .message-footer, .user-actions, #stopBtnContainer { 
+                display: none !important; 
+            }
+            
+            /* 确保报告可见 */
+            .chat-scroll-area { overflow: visible !important; height: auto !important; }
+            .chat-content { max-width: 100% !important; margin: 0 !important; }
+            
+            /* 报告样式微调 */
+            .analysis-report { 
+                box-shadow: none !important; 
+                border: none !important; 
+                margin-top: 0 !important;
+            }
+            .report-header button { display: none !important; }
+            
+            /* 🔥 关键：强制展开所有折叠面板，确保打印时能看到里面的图和字 */
+            .accordion-collapse { 
+                display: block !important; 
+                height: auto !important; 
+                opacity: 1 !important; 
+                visibility: visible !important;
+            }
+            .accordion-button::after { display: none !important; } /* 隐藏折叠箭头 */
+            .accordion-button { pointer-events: none; padding-left: 0; font-weight: bold; color: #000 !important; background: none !important; }
+            .accordion-item { border: none; border-bottom: 1px solid #eee; page-break-inside: avoid; }
+            
+            /* 图片防跨页 */
+            img { max-width: 80% !important; page-break-inside: avoid; display: block; margin: 10px 0; }
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        }
+
+        /* ================= 输入框区域 ================= */
+        .input-wrapper { position: fixed; bottom: 30px; left: 0; width: 100%; display: flex; justify-content: center; padding: 0 20px; z-index: 100; pointer-events: none; }
+        .chat-input-panel { pointer-events: auto; width: 100%; max-width: var(--chat-width); background: #fff; border: 1px solid #e6e6e6; border-radius: 20px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); padding: 10px 14px; display: flex; flex-direction: column; transition: box-shadow 0.2s; }
+        .chat-input-panel:focus-within { box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1); border-color: #d0d0d0; }
+        .input-area { width: 100%; margin-bottom: 4px; display: flex; align-items: center; }
+        .main-input { width: 100%; border: none; outline: none; font-size: 16px; line-height: 1.5; resize: none; color: #333; background: transparent; font-family: inherit; height: 24px; min-height: 24px; max-height: 200px; overflow-y: hidden; padding: 0; margin: 0; box-sizing: border-box; }
+        .main-input::placeholder { color: #aaa; }
+        .main-input:disabled { background: transparent; cursor: not-allowed; color: #999; }
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+        .toolbar-left { display: flex; gap: 10px; }
+        .toolbar-right { display: flex; align-items: center; gap: 10px; }
+        .icon-btn { width: 34px; height: 34px; border-radius: 8px; border: none; background: transparent; color: #666; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s, color 0.2s; font-size: 18px; }
+        .icon-btn:hover { background: #f5f5f5; color: #333; }
+        .icon-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+        .send-btn { width: 34px; height: 34px; border-radius: 50%; background: #e5e5e5; color: #fff; border: none; display: flex; align-items: center; justify-content: center; cursor: not-allowed; transition: all 0.2s; margin-left: 8px; }
+        .send-btn.active { background: #333; cursor: pointer; }
+        .send-btn i { font-size: 16px; }
+        
+        /* ⏹️ 停止按钮 */
+        .stop-btn { display: none; background-color: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 20px; padding: 4px 12px; font-size: 12px; cursor: pointer; align-items: center; gap: 4px; transition: all 0.2s; pointer-events: auto; }
+        .stop-btn.show { display: flex; }
+        .stop-btn:hover { background-color: #fecaca; }
+
+        .file-chips-area { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+        .file-chip { background: #f7f7f7; border: 1px solid #eee; border-radius: 6px; padding: 2px 8px; font-size: 12px; color: #555; display: flex; align-items: center; gap: 6px; }
+        #dropOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); z-index: 999; display: none; flex-direction: column; justify-content: center; align-items: center; color: var(--primary-color); }
+        
+        /* 灯箱 */
+        .lightbox { display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.9); justify-content: center; align-items: center; }
+        .lightbox img { max-width: 90%; max-height: 90%; border-radius: 4px; }
+        .lightbox-close { position: absolute; top: 20px; right: 30px; color: #f1f1f1; font-size: 40px; font-weight: bold; cursor: pointer; }
+        
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <div id="dropOverlay">
+        <i class="bi bi-cloud-upload" style="font-size: 48px; margin-bottom: 10px;"></i>
+        <h4>释放文件以上传</h4>
+    </div>
+
+    <!-- 🔍 图片灯箱 -->
+    <div id="lightbox" class="lightbox" onclick="closeLightbox()">
+        <span class="lightbox-close">&times;</span>
+        <img id="lightbox-img" src="">
+    </div>
+
+    <nav class="navbar">
+        <div class="container d-flex justify-content-center">
+            <div class="brand-logo"><i class="bi bi-stars" style="color: var(--primary-color);"></i> GIBH Qwen Agent</div>
+        </div>
+    </nav>
+
+    <div class="chat-scroll-area" id="chatBox">
+        <div class="chat-content" id="chatContent">
+            <!-- 开场白 -->
+            <div class="message-row ai">
+                <div class="avatar ai"><i class="bi bi-robot"></i></div>
+                <div class="message-container">
+                    <div class="bubble">
+                        <p>你好！我是您的 <b>GIBH Qwen 生信智能助手</b>。</p>
+                        <p>我可以协助您进行工具查询、数据上传及 Scanpy 流程规划。同时，我也具备<b>视觉分析能力</b>，您可以发送：</p>
+                        <ul>
+                            <li>📸 <b>报错截图</b>：获取故障诊断与修复建议。</li>
+                            <li>📊 <b>生信图表</b>：解读 UMAP、热图等数据的生物学意义。</li>
+                        </ul>
+                        <p style="margin-top: 10px; font-size: 12px; color: #888;">
+                            <i class="bi bi-info-circle"></i> 试着直接拖入一张图片，或者问我："帮我规划一个单细胞流程"。
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-wrapper">
+        <!-- ⏹️ 停止生成按钮 -->
+        <div id="stopBtnContainer" style="position: absolute; top: -40px; width: 100%; display: flex; justify-content: center; pointer-events: none;">
+            <button id="stopBtn" class="stop-btn" onclick="stopGeneration()">
+                <i class="bi bi-stop-circle-fill"></i> 停止生成
+            </button>
+        </div>
+
+        <div class="chat-input-panel">
+            <div id="filePreviewArea" class="file-chips-area"></div>
+            <div class="input-area">
+                <textarea id="userInput" class="main-input" placeholder="尽管问..." rows="1" oninput="autoResize(this); checkInput();" onkeydown="handleEnter(event)"></textarea>
+            </div>
+            <div class="toolbar">
+                <div class="toolbar-left"></div>
+                <div class="toolbar-right">
+                    <input type="file" id="fileInput" style="display: none;" onchange="handleFileSelect(this.files)" multiple>
+                    <button id="uploadBtn" class="icon-btn" onclick="document.getElementById('fileInput').click()" title="上传文件">
+                        <i class="bi bi-paperclip"></i>
+                    </button>
+                    <button id="sendBtn" class="send-btn" onclick="sendMessage()">
+                        <i class="bi bi-arrow-up"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 🔥 自定义代码块渲染 + 手动高亮
+        const renderer = new marked.Renderer();
+        
+        renderer.code = function(code, language) {
+            let codeText = code;
+            if (typeof code === 'object' && code !== null) {
+                codeText = code.text || code.raw || '';
+            }
+            codeText = String(codeText || '');
+            
+            const validLang = (language && hljs.getLanguage(language)) ? language : 'plaintext';
+            
+            let highlightedCode;
+            try {
+                highlightedCode = hljs.highlight(codeText, { language: validLang }).value;
+            } catch (e) {
+                highlightedCode = codeText;
+            }
+
+            return `
+            <div class="code-block-wrapper">
+                <div class="code-header">
+                    <span>${validLang}</span>
+                    <button class="copy-btn" onclick="copyCode(this)">
+                        <i class="bi bi-clipboard"></i> 复制
+                    </button>
+                </div>
+                <pre><code class="hljs language-${validLang}">${highlightedCode}</code></pre>
+                <textarea style="display:none;">${codeText}</textarea>
+            </div>`;
+        };
+
+        marked.use({ renderer });
+
+        const chatContent = document.getElementById('chatContent');
+        const chatScrollArea = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const filePreviewArea = document.getElementById('filePreviewArea');
+        const dropOverlay = document.getElementById('dropOverlay');
+
+        let chatHistory = []; 
+        let uploadedFiles = []; 
+        let isProcessing = false; 
+        let abortController = null;
+
+        function autoResize(textarea) {
+            textarea.style.height = 'auto';
+            textarea.style.height = textarea.scrollHeight + 'px';
+            if (textarea.scrollHeight > 200) textarea.style.overflowY = "auto";
+            else textarea.style.overflowY = "hidden";
+        }
+        window.onload = () => autoResize(userInput);
+
+        function checkInput() {
+            if (isProcessing) { sendBtn.classList.remove('active'); return; }
+            if (userInput.value.trim() !== '' || uploadedFiles.length > 0) sendBtn.classList.add('active');
+            else sendBtn.classList.remove('active');
+        }
+
+        function handleEnter(e) { 
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (!isProcessing) sendMessage();
+            }
+        }
+
+        function toggleLoadingState(isLoading) {
+            isProcessing = isLoading;
+            userInput.disabled = isLoading;
+            if (isLoading) {
+                sendBtn.disabled = true; sendBtn.classList.remove('active'); userInput.style.cursor = 'wait';
+                stopBtn.classList.add('show');
+            } else {
+                sendBtn.disabled = false; userInput.style.cursor = 'text'; userInput.focus(); checkInput();
+                stopBtn.classList.remove('show');
+            }
+        }
+
+        function stopGeneration() {
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+                toggleLoadingState(false);
+                const lastBubble = chatContent.lastElementChild.querySelector('.bubble');
+                if (lastBubble) lastBubble.innerHTML += ' <span style="color:#dc2626; font-size:12px;">(已停止)</span>';
+            }
+        }
+
+        function copyCode(btn) {
+            const wrapper = btn.closest('.code-block-wrapper');
+            const code = wrapper.querySelector('textarea').value;
+            navigator.clipboard.writeText(code).then(() => {
+                const originalHtml = btn.innerHTML;
+                btn.innerHTML = '<i class="bi bi-check2"></i> 已复制';
+                setTimeout(() => btn.innerHTML = originalHtml, 2000);
+            });
+        }
+
+        function openLightbox(src) {
+            const lightbox = document.getElementById('lightbox');
+            const img = document.getElementById('lightbox-img');
+            img.src = src;
+            lightbox.style.display = 'flex';
+        }
+        function closeLightbox() {
+            document.getElementById('lightbox').style.display = 'none';
+        }
+
+        window.addEventListener('dragenter', (e) => { if(!isProcessing) { e.preventDefault(); dropOverlay.style.display = 'flex'; } });
+        window.addEventListener('dragleave', (e) => { e.preventDefault(); if (e.clientX === 0 && e.clientY === 0) dropOverlay.style.display = 'none'; });
+        window.addEventListener('dragover', (e) => e.preventDefault());
+        window.addEventListener('drop', (e) => { e.preventDefault(); dropOverlay.style.display = 'none'; if (!isProcessing && e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files); });
+        window.addEventListener('paste', (e) => { if (!isProcessing && e.clipboardData.files.length > 0) { e.preventDefault(); handleFileSelect(e.clipboardData.files); } });
+
+        async function handleFileSelect(files) {
+            if (files.length === 0) return;
+            toggleLoadingState(true);
+            for (let i = 0; i < files.length; i++) await uploadSingleFile(files[i]);
+            document.getElementById('fileInput').value = ''; 
+            toggleLoadingState(false);
+        }
+
+        async function uploadSingleFile(file) {
+            const tempId = 'temp-' + Date.now();
+            addFileTag(file.name, true, tempId);
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                removeFileTag(tempId);
+                if (data.status === 'success') {
+                    uploadedFiles.push({ id: data.file_id, name: data.file_name });
+                    renderFileTags();
+                } else alert(`上传失败: ${data.message}`);
+            } catch (e) { removeFileTag(tempId); alert(`网络错误: ${e}`); }
+        }
+
+        function renderFileTags() {
+            filePreviewArea.innerHTML = '';
+            uploadedFiles.forEach((f, index) => {
+                const div = document.createElement('div');
+                div.className = 'file-chip';
+                div.innerHTML = `<i class="bi bi-file-earmark-text"></i><span>${f.name}</span><i class="bi bi-x" style="cursor:pointer" onclick="removeFile(${index})"></i>`;
+                filePreviewArea.appendChild(div);
+            });
+        }
+        function addFileTag(name, isLoading, tempId) {
+            const div = document.createElement('div');
+            div.className = 'file-chip'; div.id = tempId;
+            div.innerHTML = `<i class="bi bi-${isLoading ? 'hourglass-split' : 'file-earmark-text'}"></i><span>${name} ${isLoading ? '(上传中...)' : ''}</span>`;
+            filePreviewArea.appendChild(div);
+        }
+        function removeFileTag(id) { const el = document.getElementById(id); if (el) el.remove(); }
+        function removeFile(index) { if(!isProcessing) { uploadedFiles.splice(index, 1); renderFileTags(); checkInput(); } }
+
+        async function sendMessage(selectedTool = null, originalQuery = null, toolParams = null, workflowData = null, useHistoryFiles = false) {
+            if (isProcessing) return;
+            let text = userInput.value.trim();
+            if (originalQuery) text = originalQuery;
+            
+            if (!text && uploadedFiles.length === 0 && !workflowData && !useHistoryFiles) return;
+
+            if (!selectedTool && !workflowData && !useHistoryFiles) {
+                appendMessage('user', text || `[发送了 ${uploadedFiles.length} 个文件]`);
+                userInput.value = ''; userInput.style.height = '24px'; 
+                checkInput();
+            }
+
+            toggleLoadingState(true);
+            const startTime = Date.now();
+            
+            const aiMessageDiv = appendMessage('ai', '<span class="spinner-border spinner-border-sm text-primary" role="status"></span><span style="margin-left:8px; color:#666;">思考中...</span>', null, null, true);
+            const aiContentDiv = aiMessageDiv; 
+            
+            const footerDiv = aiMessageDiv.closest('.message-row').querySelector('.message-footer');
+            const timerSpan = document.createElement('span');
+            timerSpan.className = 'generation-timer';
+            timerSpan.innerHTML = '<i class="bi bi-stopwatch"></i> 0.0s';
+            if (footerDiv.firstChild) footerDiv.insertBefore(timerSpan, footerDiv.firstChild);
+            else footerDiv.appendChild(timerSpan);
+
+            const timerInterval = setInterval(() => {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                timerSpan.innerHTML = `<i class="bi bi-stopwatch"></i> ${elapsed}s`;
+            }, 100);
+
+            abortController = new AbortController();
+
+            const payload = { 
+                message: text, 
+                history: chatHistory, 
+                selected_tool: selectedTool, 
+                uploaded_files: uploadedFiles,
+                tool_params: toolParams,
+                workflow_data: workflowData,
+                use_history_files: useHistoryFiles
+            };
+            
+            try {
+                const res = await fetch('/api/chat', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(payload),
+                    signal: abortController.signal
+                });
+
+                if (!res.ok) throw new Error(await res.text());
+
+                const contentType = res.headers.get("content-type");
+
+                if (contentType && contentType.includes("application/json")) {
+                    const data = await res.json();
+                    clearInterval(timerInterval);
+                    aiMessageDiv.closest('.message-row').remove();
+                    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+                    if (data.type === 'workflow_config') {
+                        appendMessage('ai', data.reply, null, duration);
+                        renderWorkflowForm(data);
+                    }
+                    else if (data.type === 'tool_config') {
+                        appendMessage('ai', data.reply, null, duration);
+                        renderToolForm(data);
+                    }
+                    else if (data.type === 'workflow_started') {
+                        appendMessage('ai', data.reply, null, duration);
+                        startWorkflowPolling(data.run_id);
+                    }
+                    else if (data.type === 'data_selector') {
+                        appendMessage('ai', data.reply, null, duration);
+                        renderDataSelector(data.datasets);
+                    }
+                    else if (data.type === 'analysis_report') {
+                        renderAnalysisReport(data);
+                    }
+                    else if (data.type === 'choice') {
+                        let html = `<p>${data.reply}</p><div class="tool-grid">`;
+                        data.candidates.forEach((tool, index) => {
+                            const name = tool.name || "Unknown Tool";
+                            const toolStr = JSON.stringify(tool).replace(/"/g, '&quot;');
+                            html += `<div class="tool-card" onclick="selectTool(${toolStr}, '${text}')"><i class="bi bi-box-seam" style="position:absolute; right:-5px; bottom:-5px; font-size:50px; opacity:0.05;"></i><strong>${index + 1}. ${name}</strong></div>`;
+                        });
+                        html += `</div>`;
+                        appendMessage('ai', html, null, duration);
+                    } 
+                    else {
+                        let content = data.reply;
+                        let codeBlock = "";
+                        if (content.includes("### 🤖 策略代码")) {
+                            const parts = content.split("### 🤖 策略代码");
+                            const preText = parts[0];
+                            const codeAndResult = parts[1];
+                            const codeMatch = codeAndResult.match(/```python([\s\S]*?)```/);
+                            if (codeMatch) codeBlock = codeMatch[1].trim();
+                            
+                            let resultText = "";
+                            if (codeAndResult.includes("### ✅ 执行结果")) {
+                                const resultParts = codeAndResult.split("### ✅ 执行结果");
+                                const rawResult = resultParts[1].match(/```text([\s\S]*?)```/);
+                                if (rawResult) resultText = rawResult[1].trim();
+                            }
+
+                            let finalHtml = marked.parse(preText);
+                            if (codeBlock) {
+                                finalHtml += `<button class="code-collapse-btn" onclick="toggleCode(this)"><i class="bi bi-code-slash"></i> 查看策略代码</button><div class="code-block-container"><pre><code class="language-python">${codeBlock}</code></pre></div>`;
+                            }
+                            if (resultText) finalHtml += formatExecutionResult(resultText);
+                            content = finalHtml;
+                        } else {
+                            content = marked.parse(content);
+                        }
+                        appendMessage('ai', content, null, duration, true);
+                    }
+                    return;
+                }
+
+                aiContentDiv.innerHTML = ''; 
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let fullText = "";
+                let thoughtBuffer = "";
+                let isThinking = false;
+                let hasThoughtBlock = false;
+                let finalAnswer = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    fullText += chunk; 
+
+                    if (chunk.includes('<think>')) {
+                        isThinking = true;
+                        hasThoughtBlock = true;
+                        if (!aiContentDiv.querySelector('.thought-process')) {
+                            aiContentDiv.innerHTML = `
+                                <div class="thought-process">
+                                    <div class="thought-summary" onclick="toggleThought(this)">
+                                        <i class="bi bi-stars"></i> 深度思考过程 (点击展开)
+                                    </div>
+                                    <div class="thought-content"></div>
+                                </div>
+                                <div class="final-answer"></div>
+                            `;
+                        }
+                    }
+
+                    if (chunk.includes('</think>')) {
+                        isThinking = false;
+                        const parts = chunk.split('</think>');
+                        thoughtBuffer += parts[0].replace('<think>', '');
+                        const thoughtDiv = aiContentDiv.querySelector('.thought-content');
+                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer;
+
+                        if (parts[1]) {
+                            finalAnswer += parts[1];
+                            const answerDiv = aiContentDiv.querySelector('.final-answer');
+                            if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
+                        }
+                        continue; 
+                    }
+
+                    if (isThinking) {
+                        thoughtBuffer += chunk.replace('<think>', '');
+                        const thoughtDiv = aiContentDiv.querySelector('.thought-content');
+                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer; 
+                    } else {
+                        if (!hasThoughtBlock) {
+                            finalAnswer += chunk;
+                            aiContentDiv.innerHTML = marked.parse(finalAnswer);
+                        } else {
+                            finalAnswer += chunk;
+                            const answerDiv = aiContentDiv.querySelector('.final-answer');
+                            if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
+                        }
+                    }
+                    
+                    const imgs = aiContentDiv.querySelectorAll('img');
+                    imgs.forEach(img => {
+                        img.style.cursor = 'zoom-in';
+                        img.onclick = () => openLightbox(img.src);
+                    });
+
+                    scrollToBottom();
+                }
+                chatHistory.push({ user: text, ai: fullText });
+
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    aiContentDiv.innerHTML = `<span style="color:red">请求失败: ${error.message}</span>`;
+                }
+            } finally { 
+                clearInterval(timerInterval);
+                toggleLoadingState(false); 
+                abortController = null;
+            }
+        }
+
+        function appendMessage(role, content, thoughtContent = null, duration = null, isHtml = false) {
+            const row = document.createElement('div');
+            row.className = `message-row ${role}`;
+            let avatarHtml = role === 'ai' ? `<div class="avatar ai"><i class="bi bi-robot"></i></div>` : '';
+            
+            let footerHtml = '';
+            if (role === 'ai') {
+                footerHtml = `
+                <div class="message-footer">
+                    ${duration ? `<span class="generation-timer"><i class="bi bi-stopwatch"></i> ${duration}s</span>` : ''}
+                    <div style="display:flex; gap:10px;">
+                        <i class="bi bi-copy" style="cursor:pointer" onclick="copyText(this)" title="复制回答"></i>
+                    </div>
+                </div>`;
+            }
+            
+            let userActionsHtml = '';
+            if (role === 'user') {
+                userActionsHtml = `
+                <div class="user-actions">
+                    <div class="action-item" onclick="editMessage(this)"><i class="bi bi-pencil"></i> 编辑</div>
+                    <div class="action-item" onclick="copyText(this)"><i class="bi bi-copy"></i> 复制</div>
+                </div>`;
+            }
+
+            const bubbleContent = isHtml ? content : marked.parse(content);
+            row.innerHTML = `${role === 'ai' ? avatarHtml : ''}<div class="message-container"><div class="bubble">${bubbleContent}</div>${userActionsHtml}${footerHtml}</div>`;
+            chatContent.appendChild(row);
+            scrollToBottom();
+            return row.querySelector('.bubble');
+        }
+
+        // 🔥 核心功能：局部打印 (只打印报告部分，不打印聊天记录)
+        function printReport(reportId) {
+            const content = document.getElementById(reportId).innerHTML;
+            const printWindow = window.open('', '', 'height=800,width=800');
+            printWindow.document.write('<html><head><title>Analysis Report</title>');
+            // 引入 Bootstrap 样式
+            printWindow.document.write('<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">');
+            printWindow.document.write('<style>');
+            // 打印专用样式：强制展开折叠、隐藏按钮、优化排版
+            printWindow.document.write(`
+                body { font-family: 'Times New Roman', serif; padding: 40px; color: #000; }
+                .report-header { border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+                .report-title { font-size: 24px; font-weight: bold; }
+                .btn { display: none !important; } /* 隐藏按钮 */
+                .accordion-button { pointer-events: none; padding: 0; font-weight: bold; color: #000; background: none; border: none; }
+                .accordion-button::after { display: none; }
+                .accordion-collapse { display: block !important; } /* 强制展开 */
+                .accordion-item { border: none; border-bottom: 1px solid #ddd; margin-bottom: 10px; }
+                img { max-width: 80%; display: block; margin: 10px auto; page-break-inside: avoid; }
+                h6 { margin-top: 20px; font-weight: bold; font-size: 18px; border-left: 4px solid #4d6bfe; padding-left: 10px; }
+            `);
+            printWindow.document.write('</style></head><body>');
+            printWindow.document.write(content);
+            printWindow.document.write('</body></html>');
+            printWindow.document.close();
+            printWindow.focus();
+            
+            // 延时打印，确保图片加载完成
+            setTimeout(() => {
+                printWindow.print();
+                printWindow.close();
+            }, 500);
+        }
+
+        // 🔥 核心修复：通用化结果展示逻辑 (Last Plot Wins)
+        function renderAnalysisReport(data) {
+            if (!data || !data.report_data) { throw new Error("报告数据为空"); }
+            const reportId = `report-${Date.now()}`;
+            const reportData = data.report_data;
+            const diagnosis = data.diagnosis || "暂无诊断信息";
+            const stepsDetails = reportData.steps_details || [];
+            
+            // 🔍 智能寻找 Key Plot (本次任务的最高级产出)
+            // 逻辑：倒序遍历，找到第一个有图的步骤，它就是本次运行的“最终结果”
+            let keyPlotHtml = '';
+            let keyStep = null;
+            
+            for (let i = stepsDetails.length - 1; i >= 0; i--) {
+                if (stepsDetails[i].plot) {
+                    keyStep = stepsDetails[i];
+                    break;
+                }
+            }
+
+            if (keyStep) {
+                // 动态生成标题：保留步骤编号 (如 "5. PCA" -> "5. PCA 可视化结果")
+                const plotTitle = `${keyStep.name} 可视化结果`;
+
+                keyPlotHtml = `
+                    <div class="report-section">
+                        <h6>3. ${plotTitle}</h6>
+                        <div class="card border-0 shadow-sm">
+                            <div class="card-body text-center">
+                                <img src="${keyStep.plot}" style="max-width:95%; border-radius:8px; cursor:zoom-in;" onclick="openLightbox(this.src)">
+                                <p class="mt-2 text-secondary">${keyStep.summary}</p>
+                            </div>
+                        </div>
+                    </div>`;
+            } else {
+                // 全程无图 (纯预处理)
+                keyPlotHtml = `
+                    <div class="report-section">
+                        <h6>3. 处理结果</h6>
+                        <div class="alert alert-success bg-opacity-10 border-success">
+                            <i class="bi bi-check-circle-fill me-2"></i>
+                            <strong>数据预处理已完成</strong>
+                            <div class="small mt-1">所有步骤均已执行完毕。数据已准备好进行下游分析。</div>
+                        </div>
+                    </div>`;
+            }
+
+            let html = `<div class="analysis-report" id="${reportId}">
+                <div class="report-header">
+                    <span class="report-title"><i class="bi bi-file-earmark-medical text-primary"></i> 单细胞分析报告</span>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="printReport('${reportId}')">
+                        <i class="bi bi-printer"></i> 打印报告
+                    </button>
+                </div>
+                
+                <div class="report-section">
+                    <h6>1. 执行流程详情</h6>
+                    <div class="accordion" id="acc-${reportId}">`;
+            
+            if (stepsDetails.length === 0) { html += `<div class="text-muted p-2">无详细步骤日志</div>`; } 
+            else {
+                stepsDetails.forEach((step, index) => {
+                    const stepId = `step-${reportId}-${index}`;
+                    const statusIcon = step.status === 'success' ? '<i class="bi bi-check-circle-fill text-success"></i>' : '<i class="bi bi-x-circle-fill text-danger"></i>';
+                    
+                    // 如果该步骤的图已经被作为 Key Plot 展示了，这里就不重复展示大图，只保留提示
+                    const isKeyPlot = keyStep && keyStep.name === step.name;
+                    const plotHtml = step.plot ? 
+                        (isKeyPlot ? `<div class="mt-2 small text-muted"><i class="bi bi-image"></i> 图片已在下方“最终结果”区域展示</div>` : 
+                        `<div class="mt-2"><img src="${step.plot}" style="max-width:100%; border-radius:4px; border:1px solid #eee;"></div>`) 
+                        : '';
+                    
+                    const detailsHtml = step.details ? `<div class="small text-secondary mb-2 overflow-auto" style="max-height:200px;">${step.details}</div>` : '';
+                    
+                    html += `
+                    <div class="accordion-item">
+                        <h2 class="accordion-header">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">
+                                <span class="me-2">${statusIcon}</span> ${step.name}
+                                <span class="ms-auto text-muted small" style="font-weight:normal;">${step.summary || ''}</span>
+                            </button>
+                        </h2>
+                        <div id="${stepId}" class="accordion-collapse collapse" data-bs-parent="#acc-${reportId}">
+                            <div class="accordion-body">
+                                ${detailsHtml}
+                                ${plotHtml}
+                            </div>
+                        </div>
+                    </div>`;
+                });
+            }
+            
+            html += `</div></div>
+                <div class="report-section">
+                    <h6>2. AI 专家诊断</h6>
+                    <div class="llm-diagnosis">${marked.parse(diagnosis)}</div>
+                </div>
+                ${keyPlotHtml}
+            </div>`;
+            
+            appendMessage('ai', html, null, null, true);
+        }
+
+        function startWorkflowPolling(runId) {
+            const monitorId = `monitor-${runId}`;
+            const html = `<div class="workflow-monitor" id="${monitorId}"><h6>🚀 工作流执行进度</h6><div class="steps-container"></div></div>`;
+            appendMessage('ai', html, null, null, true);
+            const container = document.getElementById(monitorId).querySelector('.steps-container');
+            const poll = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/workflow/status/${runId}`);
+                    const data = await res.json();
+                    if (data.status === 'not_found') { clearInterval(poll); return; }
+                    let stepsHtml = '';
+                    if (data.steps_status && Array.isArray(data.steps_status)) {
+                        data.steps_status.forEach((step, index) => {
+                            let iconClass = 'pending'; let iconContent = '<i class="bi bi-circle"></i>';
+                            if (step.status === 'running') { iconClass = 'running'; iconContent = '<i class="bi bi-arrow-repeat"></i>'; }
+                            else if (step.status === 'success') { iconClass = 'success'; iconContent = '<i class="bi bi-check-lg"></i>'; }
+                            else if (step.status === 'failed') { iconClass = 'failed'; iconContent = '<i class="bi bi-x-lg"></i>'; }
+                            stepsHtml += `<div class="step-item"><div class="step-icon ${iconClass}">${iconContent}</div><div class="step-name">${step.name || 'Step ' + (index + 1)}</div><div class="step-status-text">${step.status}</div></div>`;
+                        });
+                        container.innerHTML = stepsHtml;
+                    }
+                    if (data.completed) {
+                        clearInterval(poll);
+                        if (data.status === 'success') {
+                            container.innerHTML += `<div class="alert alert-success mt-3 mb-0">🎉 工作流全部执行完成！正在加载报告...</div>`;
+                            const reportPayload = { diagnosis: data.report_data.diagnosis || "✅ **分析成功！**", report_data: data.report_data };
+                            setTimeout(() => { renderAnalysisReport(reportPayload); scrollToBottom(); }, 500);
+                        } else { container.innerHTML += `<div class="alert alert-danger mt-3 mb-0">❌ 执行出错: ${data.error}</div>`; }
+                    }
+                } catch (e) { console.error(e); }
+            }, 2000);
+        }
+
+        function renderWorkflowForm(data) {
+            const formId = `wf-${Date.now()}`;
+            let formHtml = `<div class="params-form" id="${formId}"><h5>📋 ${data.workflow_name}</h5><p class="text-muted">请确认或修改每一步的参数：</p><div class="accordion" id="acc-${formId}">`;
+            data.steps.forEach((step, index) => {
+                const stepId = `step-${index}`;
+                formHtml += `<div class="accordion-item"><h2 class="accordion-header d-flex align-items-center"><div class="form-check ms-3 me-2"><input class="form-check-input step-checkbox" type="checkbox" checked data-index="${index}"></div><button class="accordion-button ${index > 0 ? 'collapsed' : ''}" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">${step.name}</button></h2><div id="${stepId}" class="accordion-collapse collapse ${index === 0 ? 'show' : ''}" data-bs-parent="#acc-${formId}"><div class="accordion-body"><p class="text-muted small">${step.desc || ''}</p><input type="hidden" name="tool_id_${index}" value="${step.tool_id}"><input type="hidden" name="step_name_${index}" value="${step.name}">`;
+                if (Array.isArray(step.params)) {
+                    step.params.forEach(p => {
+                        const inputName = `param_${index}_${p.name}`;
+                        formHtml += `<div class="mb-2"><label class="form-label small">${p.label || p.name}</label>`;
+                        if (p.type === 'select') {
+                            formHtml += `<select class="form-select form-select-sm" name="${inputName}">`;
+                            p.options.forEach(opt => { const selected = opt.value === p.value ? 'selected' : ''; formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`; });
+                            formHtml += `</select>`;
+                        } else if (p.type === 'boolean') {
+                            const checked = p.value === 'true' ? 'checked' : '';
+                            formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${inputName}" ${checked}></div>`;
+                        } else { formHtml += `<input type="text" class="form-control form-control-sm" name="${inputName}" value="${p.value || ''}">`; }
+                        formHtml += `</div>`;
+                    });
+                }
+                formHtml += `</div></div></div>`;
+            });
+            formHtml += `</div><button class="btn btn-success btn-run mt-3" onclick="submitWorkflow('${formId}', ${data.steps.length})">🚀 执行工作流</button></div>`;
+            appendMessage('ai', formHtml, null, null, true);
+        }
+
+        function submitWorkflow(formId, totalSteps) {
+            if (uploadedFiles.length === 0) { alert("⚠️ 请先上传单细胞数据文件 (.h5ad, .mtx 等) 再执行工作流！"); document.getElementById('fileInput').click(); return; }
+            const formContainer = document.getElementById(formId);
+            const stepsData = [];
+            const checkboxes = formContainer.querySelectorAll('.step-checkbox');
+            checkboxes.forEach((cb, i) => {
+                if (cb.checked) {
+                    const toolId = formContainer.querySelector(`input[name="tool_id_${i}"]`).value;
+                    const stepName = formContainer.querySelector(`input[name="step_name_${i}"]`).value;
+                    const params = {};
+                    const inputs = formContainer.querySelectorAll(`[name^="param_${i}_"]`);
+                    inputs.forEach(input => {
+                        const originalName = input.name.replace(`param_${i}_`, '');
+                        if (input.type === 'checkbox') params[originalName] = input.checked;
+                        else params[originalName] = input.value;
+                    });
+                    stepsData.push({ name: stepName, tool_id: toolId, params: params });
+                }
+            });
+            if (stepsData.length === 0) { alert("请至少选择一个步骤！"); return; }
+            const btn = formContainer.querySelector('button'); btn.disabled = true; btn.innerText = "工作流执行中...";
+            sendMessage(null, "Execute Workflow", null, { steps: stepsData });
+        }
+
+        function renderToolForm(data) {
+            const formId = `form-${Date.now()}`;
+            let formHtml = `<div class="params-form" id="${formId}"><h5>🛠️ ${data.tool_name} 参数配置</h5><hr>`;
+            data.params.forEach(p => {
+                formHtml += `<div class="mb-3"><label class="form-label">${p.label}</label>`;
+                if (p.type === 'select') {
+                    formHtml += `<select class="form-select" name="${p.name}">`;
+                    p.options.forEach(opt => { const selected = opt.value === p.value ? 'selected' : ''; formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`; });
+                    formHtml += `</select>`;
+                } else if (p.type === 'boolean') {
+                    const checked = p.value === 'true' ? 'checked' : '';
+                    formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${p.name}" ${checked}></div>`;
+                } else { formHtml += `<input type="text" class="form-control" name="${p.name}" value="${p.value || ''}">`; }
+                if (p.help) formHtml += `<div class="form-text">${p.help}</div>`;
+                formHtml += `</div>`;
+            });
+            const toolInfoStr = JSON.stringify({name: data.tool_name, id: data.tool_id}).replace(/"/g, '&quot;');
+            formHtml += `<button class="btn btn-primary btn-run" onclick="submitToolForm('${formId}', ${toolInfoStr})">🚀 确认并执行</button></div>`;
+            appendMessage('ai', formHtml, null, null, true);
+        }
+
+        function submitToolForm(formId, toolInfo) {
+            const formContainer = document.getElementById(formId);
+            const inputs = formContainer.querySelectorAll('input, select');
+            const params = {};
+            inputs.forEach(input => { if (input.type === 'checkbox') params[input.name] = input.checked; else params[input.name] = input.value; });
+            const btn = formContainer.querySelector('button'); btn.disabled = true; btn.innerText = "已提交...";
+            sendMessage(toolInfo, `Run ${toolInfo.name} with params`, params);
+        }
+
+        function renderDataSelector(datasets) {
+            const selectorId = `ds-${Date.now()}`;
+            let html = `<div class="data-selector-container" id="${selectorId}"><div class="data-selector-header"><i class="bi bi-folder2-open"></i> 选择 Galaxy 历史数据</div><div class="data-selector-list">`;
+            datasets.forEach(d => { html += `<div class="dataset-item" onclick="toggleCheckbox(this)"><input type="checkbox" class="form-check-input" value="${d.id}" data-name="${d.name}" onclick="event.stopPropagation(); toggleCheckbox(this.parentElement, true)"><div class="dataset-info"><span class="dataset-name">${d.hid}: ${d.name}</span><span class="dataset-meta">${d.ext} | ${d.size}</span></div></div>`; });
+            html += `</div><div class="data-selector-footer"><button class="btn btn-primary btn-sm" onclick="submitDataSelection('${selectorId}')">确认使用 <i class="bi bi-check2"></i></button></div></div>`;
+            appendMessage('ai', html, null, null, true);
+        }
+
+        function toggleCheckbox(row, fromCheckbox = false) {
+            const checkbox = row.querySelector('input[type="checkbox"]');
+            if (!fromCheckbox) checkbox.checked = !checkbox.checked;
+            if(checkbox.checked) row.classList.add('selected'); else row.classList.remove('selected');
+        }
+
+        function submitDataSelection(selectorId) {
+            const container = document.getElementById(selectorId);
+            const checkboxes = container.querySelectorAll('input:checked');
+            if (checkboxes.length === 0) { alert("请至少选择一个文件"); return; }
+            uploadedFiles = []; let selectedNames = [];
+            checkboxes.forEach(cb => { const name = cb.getAttribute('data-name'); uploadedFiles.push({ id: cb.value, name: name }); selectedNames.push(name); });
+            const btn = container.querySelector('button'); btn.disabled = true; btn.innerText = "已选择";
+            const userMsg = `我已选择以下文件：\n${selectedNames.join('\n')}\n\n请基于这些文件，继续规划 Seurat 单细胞分析工作流。`;
+            appendMessage('user', userMsg);
+            sendMessage(null, "已选择文件，请继续规划 Seurat 单细胞工作流", null, null, true);
+        }
+
+        function formatExecutionResult(text) {
+            text = text.trim();
+            let tableHtml = '<div class="props-panel">';
+            let hasData = false;
+            if (text.startsWith('{') && text.endsWith('}')) {
+                try {
+                    let jsonStr = text.replace(/'/g, '"').replace(/\bFalse\b/g, 'false').replace(/\bTrue\b/g, 'true').replace(/\bNone\b/g, 'null');
+                    const obj = JSON.parse(jsonStr);
+                    for (const [key, value] of Object.entries(obj)) {
+                        hasData = true;
+                        const displayValue = (typeof value === 'object' && value !== null) ? JSON.stringify(value) : value;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${key}</div><div class="prop-value">${displayValue}</div></div>`;
+                    }
+                } catch (e) { console.warn("Dict parse failed"); }
+            }
+            if (!hasData) {
+                const lines = text.split('\n');
+                lines.forEach(line => {
+                    const match = line.match(/^\s*([^:]+):\s*(.*)$/);
+                    if (match) {
+                        hasData = true;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${match[1].trim()}</div><div class="prop-value">${match[2].trim()}</div></div>`;
+                    }
+                });
+            }
+            tableHtml += '</div>';
+            return hasData ? `<h6>✅ 执行结果</h6>${tableHtml}` : `<h6>✅ 执行结果</h6><pre>${text}</pre>`;
+        }
+
+        function toggleCode(btn) {
+            const container = btn.nextElementSibling;
+            if (container.style.display === 'block') { container.style.display = 'none'; btn.innerHTML = '<i class="bi bi-code-slash"></i> 查看策略代码'; }
+            else { container.style.display = 'block'; btn.innerHTML = '<i class="bi bi-chevron-up"></i> 收起代码'; }
+        }
+
+        function toggleThought(header) {
+            const content = header.nextElementSibling;
+            if (content.classList.contains('open')) {
+                content.classList.remove('open');
+                header.querySelector('i').className = 'bi bi-stars';
+            } else {
+                content.classList.add('open');
+                header.querySelector('i').className = 'bi bi-chevron-down';
+            }
+        }
+
+        function copyText(btn) {
+            let text = "";
+            const container = btn.closest('.message-container');
+            if (container) {
+                text = container.querySelector('.bubble').innerText;
+            }
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => {
+                    const icon = btn.querySelector('i');
+                    if(icon) { const originalClass = icon.className; icon.className = 'bi bi-check'; setTimeout(() => icon.className = originalClass, 2000); }
+                });
+            } else {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed"; textArea.style.left = "-9999px";
+                document.body.appendChild(textArea); textArea.focus(); textArea.select();
+                try { document.execCommand('copy'); } catch (err) {}
+                document.body.removeChild(textArea);
+            }
+        }
+
+        function editMessage(btn) {
+            const container = btn.closest('.message-container');
+            const text = container.querySelector('.bubble').innerText;
+            userInput.value = text; userInput.focus(); autoResize(userInput); checkInput();
+        }
+
+        function selectTool(tool, query) { appendMessage('user', `我选择运行: <b>${tool.name}</b>`); sendMessage(tool, query); }
+        function scrollToBottom() { chatScrollArea.scrollTop = chatScrollArea.scrollHeight; }
+    </script>
+</body>
+</html>

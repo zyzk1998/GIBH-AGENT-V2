@@ -10,6 +10,7 @@ from ..base_agent import BaseAgent
 from ...core.llm_client import LLMClient
 from ...core.prompt_manager import PromptManager
 from ...core.dispatcher import TaskDispatcher
+from ...core.test_data_manager import TestDataManager
 from ...tools.cellranger_tool import CellRangerTool
 from ...tools.scanpy_tool import ScanpyTool
 
@@ -31,7 +32,8 @@ class RNAAgent(BaseAgent):
         prompt_manager: PromptManager,
         dispatcher: Optional[TaskDispatcher] = None,
         cellranger_config: Optional[Dict[str, Any]] = None,
-        scanpy_config: Optional[Dict[str, Any]] = None
+        scanpy_config: Optional[Dict[str, Any]] = None,
+        test_data_dir: Optional[str] = None
     ):
         """初始化转录组智能体"""
         super().__init__(llm_client, prompt_manager, "rna_expert")
@@ -42,6 +44,8 @@ class RNAAgent(BaseAgent):
         self.cellranger_tool = CellRangerTool(self.cellranger_config)
         # 将 cellranger_tool 传递给 scanpy_tool，使其可以使用 Cell Ranger 功能
         self.scanpy_tool = ScanpyTool(self.scanpy_config, cellranger_tool=self.cellranger_tool)
+        # 初始化测试数据管理器
+        self.test_data_manager = TestDataManager(test_data_dir)
         
         # 标准工作流步骤（十步流程）
         self.workflow_steps = [
@@ -72,9 +76,60 @@ class RNAAgent(BaseAgent):
             - workflow_config: 工作流配置（JSON）
             - chat_response: 聊天响应（流式）
             - task_submitted: 任务提交信息
+            - test_data_selection: 测试数据选择请求
         """
         query_lower = query.lower().strip()
         file_paths = self.get_file_paths(uploaded_files or [])
+        
+        # 智能数据检测：如果需要 Cell Ranger 但没有上传文件，提供测试数据选择
+        needs_cellranger = self._needs_cellranger(query_lower)
+        if needs_cellranger and not file_paths:
+            # 检查是否有测试数据可用
+            test_datasets = self.test_data_manager.scan_test_datasets()
+            if test_datasets:
+                # 返回测试数据选择请求
+                return {
+                    "type": "test_data_selection",
+                    "message": "检测到您没有上传相关数据。请选择：",
+                    "options": [
+                        "1. 使用本地测试数据集",
+                        "2. 上传您自己的数据"
+                    ],
+                    "datasets": test_datasets,
+                    "datasets_json": self.test_data_manager.format_datasets_for_selection(test_datasets),
+                    "datasets_display": self.test_data_manager.format_datasets_for_display(test_datasets)
+                }
+            else:
+                # 没有测试数据，提示用户上传
+                return {
+                    "type": "chat",
+                    "response": self._stream_string_response(
+                        "检测到您没有上传相关数据，且没有可用的测试数据集。\n"
+                        "请上传 FASTQ 文件或 .h5ad 文件以开始分析。"
+                    )
+                }
+        
+        # 处理测试数据选择（用户通过 JSON 选择）
+        if "test_dataset_id" in kwargs:
+            dataset_id = kwargs["test_dataset_id"]
+            dataset = self.test_data_manager.get_dataset_by_id(dataset_id)
+            if dataset:
+                # 使用选定的测试数据
+                if dataset.get("fastq_dir") and dataset.get("reference"):
+                    # 有 FASTQ 和参考基因组，使用它们
+                    file_paths = [dataset["fastq_dir"]]
+                    # 将参考基因组路径添加到配置中
+                    self.cellranger_config["reference"] = dataset["reference"]
+                elif dataset.get("h5ad_file"):
+                    # 只有 .h5ad 文件，直接使用
+                    file_paths = [dataset["h5ad_file"]]
+                else:
+                    return {
+                        "type": "chat",
+                        "response": self._stream_string_response(
+                            f"测试数据集 {dataset['name']} 不可用。"
+                        )
+                    }
         
         # 意图识别
         is_workflow_request = self._is_workflow_request(query_lower, file_paths)
@@ -109,6 +164,14 @@ class RNAAgent(BaseAgent):
             return True
         
         return False
+    
+    def _needs_cellranger(self, query: str) -> bool:
+        """判断是否需要 Cell Ranger（基于查询关键词）"""
+        cellranger_keywords = [
+            "cellranger", "cell ranger", "fastq", "fq", "测序",
+            "第一步", "全流程", "完整流程", "从fastq", "从测序"
+        ]
+        return any(kw in query for kw in cellranger_keywords)
     
     async def _generate_workflow_config(
         self,
