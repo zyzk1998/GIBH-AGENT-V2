@@ -35,6 +35,14 @@
 
 ## 🏗 技术架构
 
+<div align="center">
+  <img src="./System Architecture" width="400" alt="GIBH-AGENT-V2 System Architecture">
+  <br>
+  <em>GIBH-AGENT-V2 微服务交互架构图</em>
+</div>
+
+<br>
+
 系统采用前后端分离的微服务架构，各组件通过 Docker Compose 编排：
 
 | 组件 | 技术选型 | 说明 |
@@ -74,6 +82,14 @@ TaskDispatcher (任务分发器) - 提交到 HPC 集群
 ```
 
 ---
+
+## 系统图
+
+<div align="center">
+  <img src="./Data flow" width="800" alt="Data Flow Pipeline">
+  <br>
+  <em>智能体数据处理与逻辑流向图</em>
+</div>
 
 ## ⚡ 快速开始
 
