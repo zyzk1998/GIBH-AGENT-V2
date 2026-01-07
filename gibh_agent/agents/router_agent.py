@@ -132,6 +132,7 @@ class RouterAgent(BaseAgent):
     ) -> Optional[Dict[str, Any]]:
         """基于关键词的快速路由"""
         import logging
+        import os
         logger = logging.getLogger(__name__)
         
         query_lower = query.lower()
@@ -139,7 +140,49 @@ class RouterAgent(BaseAgent):
         
         logger.debug(f"🔍 快速路由: 查询='{query_lower[:50]}...', 文件数={len(file_paths)}")
         
-        # 检查文件扩展名
+        # 🔥 文件优先启发式：在调用 LLM 之前，根据文件扩展名强制路由
+        if file_paths:
+            # 提取所有文件扩展名
+            file_extensions = set()
+            for path in file_paths:
+                # 处理相对路径和绝对路径
+                if os.path.isabs(path):
+                    ext = os.path.splitext(path)[1].lower()
+                else:
+                    ext = os.path.splitext(path)[1].lower()
+                if ext:
+                    file_extensions.add(ext)
+            
+            logger.info(f"📁 检测到的文件扩展名: {file_extensions}")
+            
+            # RNA/转录组文件扩展名
+            rna_extensions = {'.h5ad', '.mtx', '.fastq', '.fq', '.bam', '.sam'}
+            # 代谢组文件扩展名
+            metabolomics_extensions = {'.csv', '.txt', '.xlsx', '.xls', '.tsv'}
+            
+            # 检查是否有 RNA 文件
+            if file_extensions & rna_extensions:
+                logger.info(f"✅ 文件优先路由: 检测到 RNA 文件扩展名 {file_extensions & rna_extensions} → rna_agent")
+                return {
+                    "modality": "transcriptomics",
+                    "intent": self._detect_intent(query) if query else "analysis",
+                    "confidence": 0.95,
+                    "routing": "rna_agent",
+                    "reasoning": f"File extension-based routing: {file_extensions & rna_extensions}"
+                }
+            
+            # 检查是否有代谢组文件
+            if file_extensions & metabolomics_extensions:
+                logger.info(f"✅ 文件优先路由: 检测到代谢组文件扩展名 {file_extensions & metabolomics_extensions} → metabolomics_agent")
+                return {
+                    "modality": "metabolomics",
+                    "intent": self._detect_intent(query) if query else "analysis",
+                    "confidence": 0.95,
+                    "routing": "metabolomics_agent",
+                    "reasoning": f"File extension-based routing: {file_extensions & metabolomics_extensions}"
+                }
+        
+        # 检查文件扩展名（使用 detect_file_type）
         file_types = set()
         for path in file_paths:
             file_type = self.detect_file_type(path)

@@ -86,6 +86,10 @@ class LLMClient:
         Returns:
             ChatCompletion 对象
         """
+        import logging
+        import json
+        logger = logging.getLogger(__name__)
+        
         params = {
             "model": self.model,
             "messages": messages,
@@ -95,7 +99,44 @@ class LLMClient:
         }
         params.update(kwargs)
         
-        return self._sync_client.chat.completions.create(**params)
+        completion = self._sync_client.chat.completions.create(**params)
+        
+        # 🔥 Task 2: 强制记录原始 JSON 响应
+        try:
+            # 尝试序列化整个响应对象
+            if hasattr(completion, 'model_dump'):
+                log_payload = json.dumps(completion.model_dump(), default=str, ensure_ascii=False)
+            elif hasattr(completion, 'dict'):
+                log_payload = json.dumps(completion.dict(), default=str, ensure_ascii=False)
+            else:
+                # 提取关键信息
+                response_data = {
+                    "id": getattr(completion, 'id', None),
+                    "model": getattr(completion, 'model', None),
+                    "choices": []
+                }
+                if hasattr(completion, 'choices') and completion.choices:
+                    for choice in completion.choices:
+                        choice_data = {
+                            "index": getattr(choice, 'index', None),
+                            "message": {}
+                        }
+                        if hasattr(choice, 'message'):
+                            msg = choice.message
+                            choice_data["message"] = {
+                                "role": getattr(msg, 'role', None),
+                                "content": getattr(msg, 'content', None)
+                            }
+                        response_data["choices"].append(choice_data)
+                log_payload = json.dumps(response_data, default=str, ensure_ascii=False)
+            
+            logger.info(f"🔥 [LLM_RAW_DUMP] {log_payload}")
+        except Exception as e:
+            # 如果序列化失败，至少记录字符串表示
+            logger.info(f"🔥 [LLM_RAW_DUMP] {str(completion)}")
+            logger.warning(f"⚠️ 无法序列化响应对象: {e}")
+        
+        return completion
     
     async def achat(
         self,
@@ -114,6 +155,9 @@ class LLMClient:
         Returns:
             ChatCompletion 对象
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         params = {
             "model": self.model,
             "messages": messages,
@@ -123,7 +167,46 @@ class LLMClient:
         }
         params.update(kwargs)
         
-        return await self._async_client.chat.completions.create(**params)
+        import json
+        
+        completion = await self._async_client.chat.completions.create(**params)
+        
+        # 🔥 Task 2: 强制记录原始 JSON 响应
+        try:
+            # 尝试序列化整个响应对象
+            if hasattr(completion, 'model_dump'):
+                log_payload = json.dumps(completion.model_dump(), default=str, ensure_ascii=False)
+            elif hasattr(completion, 'dict'):
+                log_payload = json.dumps(completion.dict(), default=str, ensure_ascii=False)
+            else:
+                # 提取关键信息
+                response_data = {
+                    "id": getattr(completion, 'id', None),
+                    "model": getattr(completion, 'model', None),
+                    "choices": []
+                }
+                if hasattr(completion, 'choices') and completion.choices:
+                    for choice in completion.choices:
+                        choice_data = {
+                            "index": getattr(choice, 'index', None),
+                            "message": {}
+                        }
+                        if hasattr(choice, 'message'):
+                            msg = choice.message
+                            choice_data["message"] = {
+                                "role": getattr(msg, 'role', None),
+                                "content": getattr(msg, 'content', None)
+                            }
+                        response_data["choices"].append(choice_data)
+                log_payload = json.dumps(response_data, default=str, ensure_ascii=False)
+            
+            logger.info(f"🔥 [LLM_RAW_DUMP] {log_payload}")
+        except Exception as e:
+            # 如果序列化失败，至少记录字符串表示
+            logger.info(f"🔥 [LLM_RAW_DUMP] {str(completion)}")
+            logger.warning(f"⚠️ 无法序列化响应对象: {e}")
+        
+        return completion
     
     async def astream(
         self,
@@ -140,6 +223,9 @@ class LLMClient:
         Yields:
             ChatCompletionChunk 对象
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         params = {
             "model": self.model,
             "messages": messages,
@@ -149,8 +235,45 @@ class LLMClient:
         }
         params.update(kwargs)
         
+        import json
+        
+        # 🔥 Task 2: 收集流式响应并记录完整 JSON
+        collected_content = []
+        collected_chunks = []
         async for chunk in await self._async_client.chat.completions.create(**params):
+            if chunk.choices and chunk.choices[0].delta.content:
+                collected_content.append(chunk.choices[0].delta.content)
+            # 收集完整的 chunk 对象用于 JSON 序列化
+            collected_chunks.append(chunk)
             yield chunk
+        
+        # 记录完整的流式响应内容（JSON 格式）
+        if collected_chunks:
+            try:
+                # 构建完整的响应对象表示
+                stream_data = {
+                    "type": "stream",
+                    "content": "".join(collected_content),
+                    "chunks_count": len(collected_chunks)
+                }
+                # 尝试序列化最后一个 chunk 的完整信息
+                if collected_chunks:
+                    last_chunk = collected_chunks[-1]
+                    if hasattr(last_chunk, 'model_dump'):
+                        stream_data["last_chunk"] = last_chunk.model_dump()
+                    else:
+                        stream_data["last_chunk"] = {
+                            "id": getattr(last_chunk, 'id', None),
+                            "model": getattr(last_chunk, 'model', None)
+                        }
+                
+                log_payload = json.dumps(stream_data, default=str, ensure_ascii=False)
+                logger.info(f"🔥 [LLM_RAW_DUMP] {log_payload}")
+            except Exception as e:
+                # 如果序列化失败，至少记录文本内容
+                raw_content = "".join(collected_content)
+                logger.info(f"🔥 [LLM_RAW_DUMP] {raw_content}")
+                logger.warning(f"⚠️ 无法序列化流式响应: {e}")
     
     def get_content(self, completion: ChatCompletion) -> str:
         """从 ChatCompletion 中提取内容"""

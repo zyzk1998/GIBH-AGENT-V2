@@ -35,6 +35,16 @@ class MetabolomicsAgent(BaseAgent):
         super().__init__(llm_client, prompt_manager, "metabolomics_expert")
         self.metabolomics_config = metabolomics_config or {}
         self.metabolomics_tool = MetabolomicsTool(self.metabolomics_config)
+        
+        # 标准工作流步骤（代谢组学分析流程）
+        self.workflow_steps = [
+            {"name": "1. 数据检查", "step_id": "inspect_data", "tool_id": "inspect_data", "desc": "检查数据文件的基本信息（样本数、代谢物数、缺失值、分组信息等）"},
+            {"name": "2. 数据预处理", "step_id": "preprocess_data", "tool_id": "preprocess_data", "desc": "数据预处理：处理缺失值、标准化、缩放"},
+            {"name": "3. 主成分分析", "step_id": "pca_analysis", "tool_id": "pca_analysis", "desc": "执行主成分分析 (PCA)，降维并提取主要变异"},
+            {"name": "4. 差异代谢物分析", "step_id": "differential_analysis", "tool_id": "differential_analysis", "desc": "执行差异代谢物分析（两组比较），识别显著差异的代谢物"},
+            {"name": "5. PCA 可视化", "step_id": "visualize_pca", "tool_id": "visualize_pca", "desc": "生成 PCA 可视化图，展示样本在主成分空间的分布"},
+            {"name": "6. 火山图可视化", "step_id": "visualize_volcano", "tool_id": "visualize_volcano", "desc": "生成火山图 (Volcano Plot)，展示差异代谢物的统计显著性"},
+        ]
     
     async def process_query(
         self,
@@ -49,25 +59,221 @@ class MetabolomicsAgent(BaseAgent):
         Returns:
             处理结果字典，可能包含：
             - chat: 聊天响应（流式）
+            - workflow_config: 工作流配置
         """
         query_lower = query.lower().strip()
         file_paths = self.get_file_paths(uploaded_files or [])
         
-        # 判断是否是工作流请求
-        is_workflow_request = self._is_workflow_request(query_lower, file_paths)
+        # 🔥 Task 1: LLM 驱动的意图检测（在生成工作流之前）
+        # 🔒 安全包装：如果意图检测失败，回退到原始逻辑
+        intent = "chat"  # 默认值
+        intent_result = None
+        try:
+            intent_result = await self._detect_intent_with_llm(query, file_paths, uploaded_files)
+            intent = intent_result.get("intent", "chat")
+            reasoning = intent_result.get("reasoning", "")
+            logger.info(f"🎯 意图检测结果: {intent} (推理: {reasoning})")
+        except Exception as e:
+            logger.warning(f"⚠️ 意图检测失败，回退到原始逻辑: {e}", exc_info=True)
+            # 回退到原始的工作流检测逻辑
+            intent = None  # 标记为未检测，使用回退逻辑
         
-        if is_workflow_request:
-            # 工作流请求：先检查数据，然后生成工作流配置
+        # 如果意图检测成功且为 explain_file，处理文件解释
+        if intent == "explain_file":
+            # 解释文件：检查文件并生成自然语言解释
+            if not file_paths:
+                return {
+                    "type": "chat",
+                    "response": self._stream_string_response("没有检测到上传的文件。请先上传文件后再询问。")
+                }
+            
+            # 检查第一个文件
+            input_path = file_paths[0]
+            try:
+                inspection_result = self.metabolomics_tool.inspect_data(input_path)
+                if "error" in inspection_result:
+                    return {
+                        "type": "chat",
+                        "response": self._stream_string_response(f"文件检查失败: {inspection_result.get('error')}")
+                    }
+                
+                # 使用 LLM 生成文件解释
+                explanation = await self._explain_file_with_llm(query, inspection_result, input_path)
+                return {
+                    "type": "chat",
+                    "response": self._stream_string_response(explanation)
+                }
+            except Exception as e:
+                logger.error(f"❌ 文件解释失败: {e}", exc_info=True)
+                return {
+                    "type": "chat",
+                    "response": self._stream_string_response(f"文件检查时出错: {str(e)}")
+                }
+        
+        # 🔒 回退逻辑：如果意图检测失败或意图不明确，使用原始逻辑
+        if intent is None or intent == "chat":
+            # 使用原始的工作流检测逻辑作为回退
+            is_workflow_request = self._is_workflow_request(query_lower, file_paths)
+            if is_workflow_request:
+                # 工作流请求：生成工作流配置
+                return await self._generate_workflow_config(query, file_paths)
+            else:
+                # 普通聊天：流式响应
+                return {
+                    "type": "chat",
+                    "response": self._stream_chat_response(query, file_paths)
+                }
+        
+        # 如果意图明确为 run_workflow，直接生成工作流配置
+        elif intent == "run_workflow":
             return await self._generate_workflow_config(query, file_paths)
+        
+        # 默认：普通聊天
         else:
-            # 普通聊天：流式响应
             return {
                 "type": "chat",
                 "response": self._stream_chat_response(query, file_paths)
             }
     
+    async def _detect_intent_with_llm(
+        self,
+        query: str,
+        file_paths: List[str],
+        uploaded_files: List[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """
+        使用 LLM 检测用户意图
+        
+        Returns:
+            {
+                "intent": "explain_file" | "run_workflow" | "chat",
+                "reasoning": "..."
+            }
+        """
+        import json
+        import os
+        
+        # 提取文件名
+        file_names = []
+        if uploaded_files:
+            for f in uploaded_files:
+                name = f.get("name") or f.get("file_name", "")
+                if name:
+                    file_names.append(name)
+        elif file_paths:
+            for path in file_paths:
+                file_names.append(os.path.basename(path))
+        
+        file_names_str = ", ".join(file_names) if file_names else "None"
+        
+        prompt = f"""分析用户输入，判断用户意图。
+
+User Input: {query}
+Uploaded Files: {file_names_str}
+
+请将意图分类为以下三种之一：
+1. "explain_file" - 用户想要了解文件内容、结构或含义（例如："这是什么文件？"、"文件里有什么？"、"解释一下这个数据"）
+2. "run_workflow" - 用户想要执行分析工作流（例如："分析一下"、"运行工作流"、"做一下分析"、"处理这个文件"）
+3. "chat" - 普通对话或询问（例如："你好"、"如何使用"、"介绍功能"）
+
+返回 JSON 格式：
+{{
+    "intent": "explain_file" | "run_workflow" | "chat",
+    "reasoning": "简要说明判断理由"
+}}"""
+        
+        messages = [
+            {"role": "system", "content": "You are an intent classification assistant. Return JSON only."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            completion = await self.llm_client.achat(messages, temperature=0.1, max_tokens=128)
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            
+            # 解析 JSON
+            json_str = response.strip()
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(json_str)
+            
+            # 验证意图值
+            valid_intents = ["explain_file", "run_workflow", "chat"]
+            if result.get("intent") not in valid_intents:
+                logger.warning(f"⚠️ LLM 返回了无效意图: {result.get('intent')}, 使用默认值 'chat'")
+                result["intent"] = "chat"
+            
+            return result
+        except Exception as e:
+            logger.error(f"❌ 意图检测失败: {e}", exc_info=True)
+            # 默认返回 chat
+            return {
+                "intent": "chat",
+                "reasoning": f"Intent detection failed: {str(e)}"
+            }
+    
+    async def _explain_file_with_llm(
+        self,
+        query: str,
+        inspection_result: Dict[str, Any],
+        file_path: str
+    ) -> str:
+        """
+        使用 LLM 生成文件解释
+        
+        Args:
+            query: 用户查询
+            inspection_result: 文件检查结果
+            file_path: 文件路径
+        
+        Returns:
+            自然语言的文件解释
+        """
+        import json
+        
+        # 格式化检查结果
+        inspection_summary = json.dumps(inspection_result, ensure_ascii=False, indent=2)
+        
+        prompt = f"""用户询问关于文件的问题。
+
+User Query: {query}
+File Path: {file_path}
+
+文件检查结果：
+{inspection_summary}
+
+请用自然语言解释这个文件的内容、结构和特点。回答应该：
+1. 简洁明了，易于理解
+2. 包含关键信息（样本数、变量数、缺失值等）
+3. 如果用户有特定问题，针对性地回答
+4. 使用中文回答
+
+回答："""
+        
+        messages = [
+            {"role": "system", "content": "You are a bioinformatics data expert. Explain file contents in natural language."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            completion = await self.llm_client.achat(messages, temperature=0.3, max_tokens=800)
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            return response
+        except Exception as e:
+            logger.error(f"❌ 文件解释生成失败: {e}", exc_info=True)
+            return f"文件解释生成失败: {str(e)}"
+    
+    def _stream_string_response(self, text: str) -> AsyncIterator[str]:
+        """将字符串转换为异步生成器（用于流式响应）"""
+        async def _generator():
+            yield text
+        return _generator()
+    
     def _is_workflow_request(self, query: str, file_paths: List[str]) -> bool:
-        """判断是否是工作流请求"""
+        """判断是否是工作流请求（保留用于向后兼容）"""
         workflow_keywords = [
             "规划", "流程", "workflow", "pipeline", "分析", "run",
             "执行", "plan", "做一下", "跑一下", "分析一下", "全流程",
@@ -107,28 +313,32 @@ class MetabolomicsAgent(BaseAgent):
         logger.info(f"   File paths: {file_paths}")
         logger.info("=" * 80)
         
-        # 强制检查：如果有文件，先检查
-        inspection_result = None
-        diagnosis_report = None
+        # 🔥 Task 1: 轻量级检查（只读前10行，不加载完整数据）
+        peek_result = None
+        recommendation = None
         if file_paths:
             input_path = file_paths[0]
-            logger.info(f"🔍 [CHECKPOINT] Inspecting file: {input_path}")
+            logger.info(f"🔍 [CHECKPOINT] Peeking at file (lightweight): {input_path}")
             try:
-                inspection_result = self.metabolomics_tool.inspect_data(input_path)
-                if "error" in inspection_result:
-                    logger.warning(f"⚠️ File inspection failed: {inspection_result.get('error')}")
+                # 使用轻量级检查，只读前10行
+                peek_result = await self._peek_data_lightweight(input_path)
+                if "error" in peek_result:
+                    logger.warning(f"⚠️ File peek failed: {peek_result.get('error')}")
                 else:
-                    logger.info(f"✅ [CHECKPOINT] File inspection successful")
-                    # 🔥 生成数据诊断和参数推荐
+                    logger.info(f"✅ [CHECKPOINT] File peek successful")
+                    # 🔥 生成 AI 推荐（基于轻量级预览）
                     try:
-                        logger.info(f"🔍 [CHECKPOINT] Generating diagnosis report...")
-                        diagnosis_report = await self._generate_diagnosis_and_recommendation(inspection_result)
-                        logger.info(f"✅ [CHECKPOINT] Diagnosis report generated")
-                    except Exception as diag_err:
-                        logger.error(f"❌ [CHECKPOINT] Diagnosis report generation failed: {diag_err}", exc_info=True)
-                        diagnosis_report = None  # 继续执行，不阻塞
+                        logger.info(f"🔍 [CHECKPOINT] Generating AI recommendations...")
+                        recommendation = await self._generate_parameter_recommendations(peek_result, query)
+                        logger.info(f"✅ [CHECKPOINT] Recommendations generated")
+                    except Exception as rec_err:
+                        logger.error(f"❌ [CHECKPOINT] Recommendation generation failed: {rec_err}", exc_info=True)
+                        recommendation = None  # 继续执行，不阻塞
             except Exception as e:
-                logger.error(f"❌ [CHECKPOINT] Error inspecting file: {e}", exc_info=True)
+                logger.error(f"❌ [CHECKPOINT] Error peeking file: {e}", exc_info=True)
+        
+        # 为了兼容性，使用 peek_result 作为 inspection_result（但只包含基本信息）
+        inspection_result = peek_result
         
         # 使用 LLM 提取目标结束步骤（例如："做到PCA" -> "pca_analysis"）
         target_end_step = None
@@ -140,15 +350,27 @@ class MetabolomicsAgent(BaseAgent):
             logger.error(f"❌ [CHECKPOINT] Error extracting target end step: {e}", exc_info=True)
             target_end_step = None  # 使用默认值（所有步骤）
         
-        # 使用 LLM 提取参数（传入检查结果和诊断报告）
+        # 🔥 Task 1: 使用推荐值或 LLM 提取参数（优先使用推荐值）
         extracted_params = {}
-        try:
-            logger.info(f"🔍 [CHECKPOINT] Extracting workflow parameters...")
-            extracted_params = await self._extract_workflow_params(query, file_paths, inspection_result, diagnosis_report)
-            logger.info(f"✅ [CHECKPOINT] Workflow parameters extracted: {list(extracted_params.keys())}")
-        except Exception as e:
-            logger.error(f"❌ [CHECKPOINT] Error extracting workflow params: {e}", exc_info=True)
-            extracted_params = {}  # 使用默认值
+        if recommendation and "params" in recommendation:
+            # 优先使用推荐值
+            rec_params = recommendation["params"]
+            extracted_params = {
+                "normalization": rec_params.get("normalization", {}).get("value", "log2"),
+                "missing_threshold": rec_params.get("missing_threshold", {}).get("value", "0.5"),
+                "scale": str(rec_params.get("scale", {}).get("value", True)).lower(),
+                "n_components": rec_params.get("n_components", {}).get("value", "10")
+            }
+            logger.info(f"✅ [CHECKPOINT] Using recommended parameters: {extracted_params}")
+        else:
+            # 如果没有推荐，使用 LLM 提取
+            try:
+                logger.info(f"🔍 [CHECKPOINT] Extracting workflow parameters with LLM...")
+                extracted_params = await self._extract_workflow_params(query, file_paths, inspection_result, None)
+                logger.info(f"✅ [CHECKPOINT] Workflow parameters extracted: {list(extracted_params.keys())}")
+            except Exception as e:
+                logger.error(f"❌ [CHECKPOINT] Error extracting workflow params: {e}", exc_info=True)
+                extracted_params = {}  # 使用默认值
         
         # 定义所有可用步骤（包含友好的中文名称）
         all_steps = [
@@ -244,20 +466,24 @@ class MetabolomicsAgent(BaseAgent):
             "steps": selected_steps
         }
         
-        # 如果生成了诊断报告，将其包含在返回结果中
+        # 🔥 Task 1: 构建返回结果，包含推荐信息
         result = {
             "type": "workflow_config",
             "workflow_data": workflow_config,
             "file_paths": file_paths
         }
         
-        if diagnosis_report:
-            result["diagnosis_report"] = diagnosis_report
+        # 添加推荐信息（如果生成成功）
+        if recommendation:
+            result["recommendation"] = recommendation
+            # 自动填充推荐值到步骤参数
+            self._apply_recommendations_to_steps(workflow_config["steps"], recommendation)
         
         logger.info("=" * 80)
         logger.info("✅ [CHECKPOINT] _generate_workflow_config SUCCESS")
         logger.info(f"   Workflow name: {workflow_config.get('workflow_name')}")
         logger.info(f"   Steps count: {len(workflow_config.get('steps', []))}")
+        logger.info(f"   Has recommendation: {recommendation is not None}")
         logger.info("=" * 80)
         
         return result
@@ -491,6 +717,279 @@ Return JSON only:
         except Exception as e:
             logger.error(f"❌ [CHECKPOINT] Error extracting parameters: {e}", exc_info=True)
             return {}  # 返回空字典，使用默认值
+    
+    async def _peek_data_lightweight(self, file_path: str) -> Dict[str, Any]:
+        """
+        轻量级数据预览（只读前10行，不加载完整数据）
+        
+        Args:
+            file_path: 文件路径
+        
+        Returns:
+            包含基本信息的字典（样本数、列数、数值范围等）
+        """
+        import pandas as pd
+        import numpy as np
+        import os
+        
+        try:
+            # 只读前10行
+            df_peek = pd.read_csv(file_path, nrows=10)
+            
+            # 获取文件总行数（不加载数据）
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                total_lines = sum(1 for _ in f) - 1  # 减去表头
+            
+            # 识别列类型
+            numeric_cols = df_peek.select_dtypes(include=[np.number]).columns.tolist()
+            metadata_cols = [col for col in df_peek.columns if col not in numeric_cols]
+            
+            # 计算数值范围（基于前10行）
+            numeric_stats = {}
+            if len(numeric_cols) > 0:
+                numeric_data = df_peek[numeric_cols]
+                numeric_stats = {
+                    "min": float(numeric_data.min().min()),
+                    "max": float(numeric_data.max().max()),
+                    "mean": float(numeric_data.mean().mean()),
+                    "has_negative": bool((numeric_data < 0).any().any()),
+                    "has_large_values": bool((numeric_data.abs() > 1000).any().any())
+                }
+            
+            return {
+                "n_samples": total_lines,
+                "n_metabolites": len(numeric_cols),
+                "n_metadata_cols": len(metadata_cols),
+                "metadata_columns": metadata_cols[:5],  # 只返回前5个
+                "numeric_stats": numeric_stats,
+                "preview_rows": 10,
+                "file_path": file_path
+            }
+        except Exception as e:
+            logger.error(f"❌ 轻量级预览失败: {e}", exc_info=True)
+            return {"error": str(e)}
+    
+    async def _generate_parameter_recommendations(
+        self,
+        peek_result: Dict[str, Any],
+        query: str
+    ) -> Dict[str, Any]:
+        """
+        基于轻量级预览生成参数推荐
+        
+        Args:
+            peek_result: 轻量级预览结果
+            query: 用户查询
+        
+        Returns:
+            推荐字典，包含 summary 和 params
+        """
+        import json
+        
+        try:
+            # 构建预览摘要
+            preview_summary = f"""
+数据预览结果：
+- 样本数: {peek_result.get('n_samples', 'N/A')}
+- 代谢物数: {peek_result.get('n_metabolites', 'N/A')}
+- 元数据列数: {peek_result.get('n_metadata_cols', 'N/A')}
+- 元数据列: {', '.join(peek_result.get('metadata_columns', []))}
+- 数值范围: {peek_result.get('numeric_stats', {})}
+"""
+            
+            prompt = f"""基于数据预览结果，生成参数推荐。
+
+用户查询: {query}
+
+{preview_summary}
+
+请分析数据特征并推荐合适的参数。返回 JSON 格式：
+{{
+    "summary": "数据特征摘要（1-2句话）",
+    "params": {{
+        "normalization": {{"value": "log2" | "zscore" | "none", "reason": "推荐理由"}},
+        "missing_threshold": {{"value": "0.5", "reason": "推荐理由"}},
+        "scale": {{"value": true | false, "reason": "推荐理由"}},
+        "n_components": {{"value": "10", "reason": "推荐理由"}}
+    }}
+}}
+
+重要：
+- 如果数值范围很大（max > 1000），推荐 "log2"
+- 如果数值范围较小且已标准化，推荐 "none" 或 "zscore"
+- 如果数据包含负值，不推荐 "log2"
+- 根据样本数推荐 n_components（通常为 min(10, 样本数/2)）
+"""
+            
+            messages = [
+                {"role": "system", "content": "You are a bioinformatics expert. Return JSON only."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            completion = await self.llm_client.achat(messages, temperature=0.2, max_tokens=800)
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            
+            # 解析 JSON
+            json_str = response.strip()
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            recommendation = json.loads(json_str)
+            
+            # 验证和补充推荐
+            if "summary" not in recommendation:
+                recommendation["summary"] = f"检测到数据包含 {peek_result.get('n_samples', 'N/A')} 个样本，{peek_result.get('n_metabolites', 'N/A')} 个代谢物。"
+            
+            if "params" not in recommendation:
+                recommendation["params"] = {}
+            
+            # 确保关键参数存在
+            numeric_stats = peek_result.get("numeric_stats", {})
+            if "normalization" not in recommendation["params"]:
+                if numeric_stats.get("has_large_values", False) and not numeric_stats.get("has_negative", False):
+                    recommendation["params"]["normalization"] = {"value": "log2", "reason": "数值跨度大，建议 Log 变换以符合正态分布"}
+                else:
+                    recommendation["params"]["normalization"] = {"value": "zscore", "reason": "标准 Z-score 标准化"}
+            
+            if "missing_threshold" not in recommendation["params"]:
+                recommendation["params"]["missing_threshold"] = {"value": "0.5", "reason": "标准质控阈值"}
+            
+            if "scale" not in recommendation["params"]:
+                recommendation["params"]["scale"] = {"value": True, "reason": "标准化有助于后续分析"}
+            
+            if "n_components" not in recommendation["params"]:
+                n_samples = peek_result.get("n_samples", 100)
+                n_comp = min(10, max(2, n_samples // 2))
+                recommendation["params"]["n_components"] = {"value": str(n_comp), "reason": f"根据样本数 ({n_samples}) 推荐"}
+            
+            return recommendation
+            
+        except Exception as e:
+            logger.error(f"❌ 生成推荐失败: {e}", exc_info=True)
+            # 返回默认推荐
+            return {
+                "summary": f"检测到数据包含 {peek_result.get('n_samples', 'N/A')} 个样本。",
+                "params": {
+                    "normalization": {"value": "log2", "reason": "默认推荐"},
+                    "missing_threshold": {"value": "0.5", "reason": "标准质控阈值"},
+                    "scale": {"value": True, "reason": "标准化有助于后续分析"},
+                    "n_components": {"value": "10", "reason": "默认值"}
+                }
+            }
+    
+    def _apply_recommendations_to_steps(
+        self,
+        steps: List[Dict[str, Any]],
+        recommendation: Dict[str, Any]
+    ):
+        """
+        将推荐值自动填充到步骤参数中
+        
+        Args:
+            steps: 工作流步骤列表
+            recommendation: 推荐字典
+        """
+        if not recommendation or "params" not in recommendation:
+            return
+        
+        rec_params = recommendation["params"]
+        
+        for step in steps:
+            if step.get("step_id") == "preprocess_data":
+                # 填充预处理参数
+                if "normalization" in rec_params:
+                    step["params"]["normalization"] = rec_params["normalization"]["value"]
+                if "missing_threshold" in rec_params:
+                    step["params"]["missing_threshold"] = rec_params["missing_threshold"]["value"]
+                if "scale" in rec_params:
+                    step["params"]["scale"] = str(rec_params["scale"]["value"]).lower()
+            
+            elif step.get("step_id") == "pca_analysis":
+                # 填充 PCA 参数
+                if "n_components" in rec_params:
+                    step["params"]["n_components"] = rec_params["n_components"]["value"]
+    
+    async def _generate_final_diagnosis(
+        self,
+        steps_details: List[Dict[str, Any]],
+        workflow_config: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        基于工作流执行结果生成最终诊断报告
+        
+        Args:
+            steps_details: 步骤执行详情列表
+            workflow_config: 工作流配置
+        
+        Returns:
+            Markdown 格式的诊断报告，如果失败返回 None
+        """
+        import json
+        
+        try:
+            # 提取关键结果
+            inspection_result = None
+            differential_result = None
+            pca_result = None
+            
+            for step_detail in steps_details:
+                tool_id = step_detail.get("tool_id")
+                step_result = step_detail.get("step_result", {})
+                
+                if tool_id == "inspect_data":
+                    inspection_result = step_result.get("data", {})
+                elif tool_id == "differential_analysis":
+                    differential_result = step_result.get("data", {})
+                elif tool_id == "pca_analysis":
+                    pca_result = step_result.get("data", {})
+            
+            # 构建结果摘要
+            results_summary = {
+                "workflow_name": workflow_config.get("workflow_name", "Metabolomics Analysis"),
+                "steps_completed": len(steps_details),
+                "inspection": inspection_result.get("summary", {}) if inspection_result else None,
+                "differential_analysis": {
+                    "significant_metabolites": differential_result.get("summary", {}).get("significant_count", "N/A") if differential_result else "N/A",
+                    "total_metabolites": differential_result.get("summary", {}).get("total_count", "N/A") if differential_result else "N/A"
+                } if differential_result else None,
+                "pca": {
+                    "variance_explained": pca_result.get("summary", {}).get("variance_explained", "N/A") if pca_result else "N/A"
+                } if pca_result else None
+            }
+            
+            # 格式化结果摘要
+            summary_json = json.dumps(results_summary, ensure_ascii=False, indent=2)
+            
+            prompt = f"""作为代谢组学分析专家，基于工作流执行结果生成最终诊断报告。
+
+工作流执行结果摘要：
+{summary_json}
+
+请生成一份专业的诊断报告，包括：
+1. 数据质量评估
+2. 主要发现（显著差异代谢物、PCA 结果等）
+3. 生物学意义解释
+4. 建议和下一步分析方向
+
+使用 Markdown 格式，使用中文，语言专业但易懂。"""
+            
+            messages = [
+                {"role": "system", "content": "You are a Senior Bioinformatician specializing in Metabolomics. Generate comprehensive diagnosis reports in Simplified Chinese using Markdown format."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            completion = await self.llm_client.achat(messages, temperature=0.3, max_tokens=2000)
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            
+            logger.info(f"📝 Generating diagnosis... Result length: {len(response)}")
+            logger.info("📝 Diagnosis generated successfully.")
+            return response
+            
+        except Exception as e:
+            logger.error(f"❌ 生成最终诊断失败: {e}", exc_info=True)
+            return None
     
     async def _stream_chat_response(
         self,
@@ -823,12 +1322,12 @@ You have access to:
                 
                 elif tool_id == "visualize_volcano":
                     # 使用差异分析结果文件
-                    diff_file = params.get("diff_file") or os.path.join(output_dir, "differential_results.csv")
+                    diff_file = params.get("diff_file") or os.path.join(output_dir, "differential_analysis.csv")
                     if not os.path.exists(diff_file):
                         # 如果差异分析文件不存在，尝试从步骤详情中获取
                         for prev_step in steps_details:
                             if prev_step.get("tool_id") == "differential_analysis":
-                                diff_file = os.path.join(output_dir, "differential_results.csv")
+                                diff_file = os.path.join(output_dir, "differential_analysis.csv")
                                 break
                     
                     result = self.metabolomics_tool.visualize_volcano(
@@ -891,6 +1390,20 @@ You have access to:
                 logger.info(f"🖼️  Final plot: {final_plot}")
             logger.info("=" * 80)
             
+            # 🔥 Task 1: 生成 AI 诊断（在所有步骤完成后）
+            diagnosis = None
+            try:
+                logger.info("📝 [CHECKPOINT] Generating AI diagnosis from workflow results...")
+                diagnosis = await self._generate_final_diagnosis(steps_details, workflow_config)
+                if diagnosis:
+                    logger.info(f"📝 Diagnosis generated successfully. Result length: {len(diagnosis)}")
+                    logger.info(f"📝 Diagnosis preview: {diagnosis[:200]}...")  # 显示前200字符
+                else:
+                    logger.warning("⚠️ [CHECKPOINT] Diagnosis generation returned None")
+            except Exception as diag_err:
+                logger.error(f"❌ [CHECKPOINT] Diagnosis generation failed: {diag_err}", exc_info=True)
+                diagnosis = "⚠️ 诊断生成失败，但分析已完成。"
+            
             # 🔥 构建返回结果
             workflow_result = {
                 "status": "success",
@@ -898,7 +1411,8 @@ You have access to:
                 "steps_details": steps_details,  # 保留旧格式以兼容
                 "steps_results": steps_results,  # 新的格式，前端可直接使用
                 "final_plot": final_plot,
-                "output_dir": output_dir
+                "output_dir": output_dir,
+                "diagnosis": diagnosis or "✅ **分析成功完成！**"  # 🔥 Task 1: 添加诊断字段
             }
             
             # 🔥 清理数据以确保 JSON 序列化安全（处理 Numpy 类型、NaN/Infinity 等）

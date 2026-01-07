@@ -1328,9 +1328,10 @@ async def upload_file(files: List[UploadFile] = File(...)):
                 "is_10x": False
             })
         
-        # 🔥 统一返回格式：始终返回 file_paths 数组（用于前端发送聊天请求）
+        # 🔥 统一返回格式：始终返回 file_paths 数组和 file_info 数组（用于前端发送聊天请求）
         # 注意：使用相对路径，因为前端需要相对于 UPLOAD_DIR 的路径
         file_paths = []
+        file_info = []
         for result in uploaded_results:
             # 转换为相对路径（相对于 UPLOAD_DIR）
             file_path_abs = result["file_path"]
@@ -1340,27 +1341,37 @@ async def upload_file(files: List[UploadFile] = File(...)):
             else:
                 rel_path = result["file_id"]  # 回退到 file_id
             file_paths.append(rel_path)
+            
+            # 构建 file_info 条目
+            file_info.append({
+                "name": result["file_name"],
+                "size": result["file_size"],
+                "path": rel_path  # 使用相对路径
+            })
         
-        # 如果只有一个文件，返回单个文件格式（兼容旧版本）
+        # 🔥 统一返回格式：始终返回一致的 JSON 结构
+        response = {
+            "status": "success",
+            "file_paths": file_paths,  # 文件路径数组（相对路径）
+            "file_info": file_info,    # 文件信息数组
+            "count": len(uploaded_results)
+        }
+        
+        # 如果只有一个文件，添加单个文件的详细信息（向后兼容）
         if len(uploaded_results) == 1:
             result = uploaded_results[0]
-            return {
-                "status": "success",
+            response.update({
                 "file_id": result["file_id"],
                 "file_name": result["file_name"],
-                "file_path": result["file_path"],
+                "file_path": result["file_path"],  # 绝对路径（向后兼容）
                 "file_size": result["file_size"],
-                "metadata": result["metadata"],
-                "file_paths": file_paths  # 🔥 添加 file_paths 数组
-            }
+                "metadata": result["metadata"]
+            })
+        else:
+            # 多个文件时，添加 files 数组（向后兼容）
+            response["files"] = uploaded_results
         
-        # 多个文件返回列表格式
-        return {
-            "status": "success",
-            "files": uploaded_results,
-            "count": len(uploaded_results),
-            "file_paths": file_paths  # 🔥 添加 file_paths 数组
-        }
+        return response
         
     except HTTPException:
         # 重新抛出 HTTP 异常（保持状态码和详细信息）
@@ -1479,23 +1490,29 @@ async def chat_endpoint(req: ChatRequest):
                     }
                 )
         
-        # 转换文件路径
+        # 🔥 转换文件路径：支持多种前端格式
         uploaded_files = []
+        logger.info(f"📥 收到 uploaded_files: {len(req.uploaded_files)} 个文件")
+        
         for file_info in req.uploaded_files:
-            file_name = file_info.get("file_name", "")
-            file_path_str = file_info.get("file_path", "")
+            # 支持多种字段名：file_name/name, file_path/path
+            file_name = file_info.get("file_name") or file_info.get("name", "")
+            file_path_str = file_info.get("file_path") or file_info.get("path", "")
             
             # 🔒 安全：清理文件名
             if file_name:
                 file_name = sanitize_filename(file_name)
             
-            # 🔒 安全：构建并验证路径
+            # 🔥 构建文件路径：优先使用 file_path，如果是相对路径则拼接 UPLOAD_DIR
             if file_path_str:
                 file_path = Path(file_path_str)
+                # 如果是相对路径，拼接 UPLOAD_DIR
+                if not file_path.is_absolute():
+                    file_path = UPLOAD_DIR / file_path
+            elif file_name:
+                # 如果没有路径，使用文件名在 UPLOAD_DIR 中查找
+                file_path = UPLOAD_DIR / file_name
             else:
-                file_path = UPLOAD_DIR / file_name if file_name else None
-            
-            if file_path is None:
                 logger.warning(f"⚠️ 无法确定文件路径，跳过: {file_info}")
                 continue
             
@@ -1508,15 +1525,26 @@ async def chat_endpoint(req: ChatRequest):
             
             # 检查文件是否存在
             if not file_path.exists():
-                logger.warning(f"⚠️ 文件不存在: {file_path}")
-                continue
+                logger.warning(f"⚠️ 文件不存在: {file_path}，尝试查找...")
+                # 尝试在 UPLOAD_DIR 中查找同名文件
+                if file_name:
+                    alt_path = UPLOAD_DIR / file_name
+                    if alt_path.exists():
+                        file_path = alt_path
+                        logger.info(f"✅ 找到文件: {file_path}")
+                    else:
+                        logger.warning(f"⚠️ 文件不存在，跳过: {file_path}")
+                        continue
+                else:
+                    continue
             
             uploaded_files.append({
-                "name": file_name,
+                "name": file_name or os.path.basename(str(file_path)),
                 "path": str(file_path)
             })
         
-        logger.info(f"📂 处理文件: {[f['path'] for f in uploaded_files]}")
+        logger.info(f"📂 处理文件: {len(uploaded_files)} 个有效文件")
+        logger.info(f"📂 文件路径列表: {[f['path'] for f in uploaded_files]}")
         
         # 处理查询
         # #region debug log

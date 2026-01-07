@@ -24,6 +24,9 @@ class FileInspector:
     
     def _is_gzipped(self, filepath: Path) -> bool:
         """检查文件是否为 gzip 压缩"""
+        # 🔥 Task 2: Check if path is directory before trying to open
+        if filepath.is_dir():
+            return False
         try:
             with open(filepath, 'rb') as f:
                 return f.read(2) == b'\x1f\x8b'
@@ -32,6 +35,9 @@ class FileInspector:
     
     def _read_head(self, filepath: Path, lines: int = 5) -> list:
         """安全读取文件前几行"""
+        # 🔥 Task 2: Check if path is directory before trying to open
+        if filepath.is_dir():
+            return []
         try:
             if self._is_gzipped(filepath):
                 with gzip.open(filepath, 'rt') as f:
@@ -47,7 +53,7 @@ class FileInspector:
         主动检测：分析单个文件并保存 .meta.json
         
         Args:
-            filename: 文件名
+            filename: 文件名或目录名
         
         Returns:
             元数据字典，如果失败返回 None
@@ -55,6 +61,39 @@ class FileInspector:
         filepath = self.upload_dir / filename
         if not filepath.exists():
             return None
+        
+        # 🔥 Task 2: Handle directory paths (10x Genomics format)
+        if filepath.is_dir():
+            # Check if it's a 10x directory (contains matrix.mtx, etc.)
+            try:
+                dir_contents = os.listdir(filepath)
+                if any(f in dir_contents for f in ['matrix.mtx', 'matrix.mtx.gz']):
+                    meta = {
+                        "filename": filename,
+                        "file_type": "10x_genomics",
+                        "path": str(filepath),
+                        "files": dir_contents,
+                        "is_directory": True
+                    }
+                    # Save metadata
+                    meta_path = filepath / '.meta.json'
+                    try:
+                        with open(meta_path, 'w', encoding='utf-8') as f:
+                            json.dump(meta, f, indent=2, ensure_ascii=False)
+                    except Exception as e:
+                        print(f"⚠️ 保存目录元数据失败: {e}")
+                    return meta
+                else:
+                    # Unknown directory format
+                    return {
+                        "filename": filename,
+                        "file_type": "directory",
+                        "error": "Unknown directory format",
+                        "is_directory": True
+                    }
+            except Exception as e:
+                print(f"⚠️ 检查目录失败: {e}")
+                return None
         
         meta = {
             "filename": filename,

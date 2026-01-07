@@ -207,17 +207,27 @@ class ScanpyTool:
             - has_umap: 是否已有 UMAP 坐标
         """
         try:
-            # 高效加载：使用 backed='r' 模式只读取元数据，不加载全部数据到内存
-            if file_path.endswith('.h5ad'):
+            # 🔥 Task 2: Check if path is directory before processing
+            if os.path.isdir(file_path):
+                # Check if it's a 10x directory (contains matrix.mtx, etc.)
+                dir_contents = os.listdir(file_path)
+                if any(f in dir_contents for f in ['matrix.mtx', 'matrix.mtx.gz']):
+                    # 10x 格式需要完整加载
+                    adata = self.load_data(file_path)
+                else:
+                    # Unknown directory format
+                    return {
+                        "error": f"Unknown directory format: {file_path}",
+                        "type": "directory",
+                        "files": dir_contents
+                    }
+            elif file_path.endswith('.h5ad'):
                 try:
                     # 尝试使用 backed 模式（只读模式，不加载全部数据）
                     adata = sc.read_h5ad(file_path, backed='r')
                 except:
                     # 如果 backed 模式失败，使用普通模式
                     adata = sc.read_h5ad(file_path)
-            elif os.path.isdir(file_path):
-                # 10x 格式需要完整加载
-                adata = self.load_data(file_path)
             else:
                 adata = sc.read(file_path)
             

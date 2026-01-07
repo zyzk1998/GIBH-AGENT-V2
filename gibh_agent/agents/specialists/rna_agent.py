@@ -85,6 +85,60 @@ class RNAAgent(BaseAgent):
         query_lower = query.lower().strip()
         file_paths = self.get_file_paths(uploaded_files or [])
         
+        # 🔥 Task 1: LLM 驱动的意图检测（在生成工作流之前）
+        # 🔒 安全包装：如果意图检测失败，回退到原始逻辑
+        intent = "chat"  # 默认值
+        intent_result = None
+        try:
+            intent_result = await self._detect_intent_with_llm(query, file_paths, uploaded_files)
+            intent = intent_result.get("intent", "chat")
+            reasoning = intent_result.get("reasoning", "")
+            logger.info(f"🎯 意图检测结果: {intent} (推理: {reasoning})")
+        except Exception as e:
+            logger.warning(f"⚠️ 意图检测失败，回退到原始逻辑: {e}", exc_info=True)
+            # 回退到原始的工作流检测逻辑
+            intent = None  # 标记为未检测，使用回退逻辑
+        
+        # 如果意图检测成功且为 explain_file，处理文件解释
+        if intent == "explain_file":
+            # 解释文件：检查文件并生成自然语言解释
+            if not file_paths:
+                return {
+                    "type": "chat",
+                    "response": self._stream_string_response("没有检测到上传的文件。请先上传文件后再询问。")
+                }
+            
+            # 检查第一个文件（如果是 h5ad，使用 scanpy 工具）
+            input_path = file_paths[0]
+            try:
+                # 使用 scanpy 工具检查文件
+                if input_path.endswith('.h5ad'):
+                    adata = self.scanpy_tool.load_data(input_path)
+                    summary = f"""
+文件类型: H5AD (AnnData)
+- 细胞数: {adata.n_obs}
+- 基因数: {adata.n_vars}
+- 观察变量: {list(adata.obs.columns) if hasattr(adata, 'obs') else 'None'}
+- 变量变量: {list(adata.var.columns) if hasattr(adata, 'var') else 'None'}
+"""
+                    explanation = await self._explain_file_with_llm(query, summary, input_path)
+                    return {
+                        "type": "chat",
+                        "response": self._stream_string_response(explanation)
+                    }
+                else:
+                    # 其他文件类型，返回基本信息
+                    return {
+                        "type": "chat",
+                        "response": self._stream_string_response(f"文件路径: {input_path}\n文件类型: {os.path.splitext(input_path)[1]}")
+                    }
+            except Exception as e:
+                logger.error(f"❌ 文件解释失败: {e}", exc_info=True)
+                return {
+                    "type": "chat",
+                    "response": self._stream_string_response(f"文件检查时出错: {str(e)}")
+                }
+        
         # 智能数据检测：如果需要 Cell Ranger 但没有上传文件，提供测试数据选择
         needs_cellranger = self._needs_cellranger(query_lower)
         if needs_cellranger and not file_paths:
@@ -135,17 +189,161 @@ class RNAAgent(BaseAgent):
                         )
                     }
         
-        # 意图识别
-        is_workflow_request = self._is_workflow_request(query_lower, file_paths)
+        # 🔒 回退逻辑：如果意图检测失败或意图不明确，使用原始逻辑
+        if intent is None or intent == "chat":
+            # 使用原始的工作流检测逻辑作为回退
+            is_workflow_request = self._is_workflow_request(query_lower, file_paths)
+            if is_workflow_request:
+                return await self._generate_workflow_config(query, file_paths)
+            else:
+                # 普通聊天
+                return {
+                    "type": "chat",
+                    "response": self._stream_chat_response(query, file_paths)
+                }
         
-        if is_workflow_request:
+        # 如果意图明确为 run_workflow，直接生成工作流配置
+        elif intent == "run_workflow":
             return await self._generate_workflow_config(query, file_paths)
+        
+        # 默认：普通聊天
         else:
-            # 普通聊天
             return {
                 "type": "chat",
                 "response": self._stream_chat_response(query, file_paths)
             }
+    
+    async def _detect_intent_with_llm(
+        self,
+        query: str,
+        file_paths: List[str],
+        uploaded_files: List[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """
+        使用 LLM 检测用户意图
+        
+        Returns:
+            {
+                "intent": "explain_file" | "run_workflow" | "chat",
+                "reasoning": "..."
+            }
+        """
+        import json
+        import os
+        
+        # 提取文件名
+        file_names = []
+        if uploaded_files:
+            for f in uploaded_files:
+                name = f.get("name") or f.get("file_name", "")
+                if name:
+                    file_names.append(name)
+        elif file_paths:
+            for path in file_paths:
+                file_names.append(os.path.basename(path))
+        
+        file_names_str = ", ".join(file_names) if file_names else "None"
+        
+        prompt = f"""分析用户输入，判断用户意图。
+
+User Input: {query}
+Uploaded Files: {file_names_str}
+
+请将意图分类为以下三种之一：
+1. "explain_file" - 用户想要了解文件内容、结构或含义（例如："这是什么文件？"、"文件里有什么？"、"解释一下这个数据"）
+2. "run_workflow" - 用户想要执行分析工作流（例如："分析一下"、"运行工作流"、"做一下分析"、"处理这个文件"）
+3. "chat" - 普通对话或询问（例如："你好"、"如何使用"、"介绍功能"）
+
+返回 JSON 格式：
+{{
+    "intent": "explain_file" | "run_workflow" | "chat",
+    "reasoning": "简要说明判断理由"
+}}"""
+        
+        messages = [
+            {"role": "system", "content": "You are an intent classification assistant. Return JSON only."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            completion = await self.llm_client.achat(messages, temperature=0.1, max_tokens=128)
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            
+            # 解析 JSON
+            json_str = response.strip()
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(json_str)
+            
+            # 验证意图值
+            valid_intents = ["explain_file", "run_workflow", "chat"]
+            if result.get("intent") not in valid_intents:
+                logger.warning(f"⚠️ LLM 返回了无效意图: {result.get('intent')}, 使用默认值 'chat'")
+                result["intent"] = "chat"
+            
+            return result
+        except Exception as e:
+            logger.error(f"❌ 意图检测失败: {e}", exc_info=True)
+            # 默认返回 chat
+            return {
+                "intent": "chat",
+                "reasoning": f"Intent detection failed: {str(e)}"
+            }
+    
+    async def _explain_file_with_llm(
+        self,
+        query: str,
+        file_summary: str,
+        file_path: str
+    ) -> str:
+        """
+        使用 LLM 生成文件解释
+        
+        Args:
+            query: 用户查询
+            file_summary: 文件摘要信息
+            file_path: 文件路径
+        
+        Returns:
+            自然语言的文件解释
+        """
+        prompt = f"""用户询问关于文件的问题。
+
+User Query: {query}
+File Path: {file_path}
+
+文件摘要信息：
+{file_summary}
+
+请用自然语言解释这个文件的内容、结构和特点。回答应该：
+1. 简洁明了，易于理解
+2. 包含关键信息（细胞数、基因数等）
+3. 如果用户有特定问题，针对性地回答
+4. 使用中文回答
+
+回答："""
+        
+        messages = [
+            {"role": "system", "content": "You are a bioinformatics data expert. Explain file contents in natural language."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            completion = await self.llm_client.achat(messages, temperature=0.3, max_tokens=800)
+            think_content, response = self.llm_client.extract_think_and_content(completion)
+            return response
+        except Exception as e:
+            logger.error(f"❌ 文件解释生成失败: {e}", exc_info=True)
+            return f"文件解释生成失败: {str(e)}"
+    
+    def _stream_string_response(self, text: str) -> AsyncIterator[str]:
+        """将字符串转换为异步生成器（用于流式响应）"""
+        async def _generator():
+            yield text
+        return _generator()
     
     def _is_workflow_request(self, query: str, file_paths: List[str]) -> bool:
         """判断是否是工作流请求"""
