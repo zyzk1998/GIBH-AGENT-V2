@@ -288,11 +288,10 @@ class LLMClient:
         """
         content = completion.choices[0].message.content or ""
         
-        # 优先解析标准 <think> 标签（我们的新协议）
-        # 然后支持其他变体（向后兼容）
+        # 优先解析 DeepSeek-R1 的 <think> 标签，然后支持其他变体（向后兼容）
         think_patterns = [
-            (r'<think>(.*?)</think>', re.DOTALL),  # 标准格式（优先）
-            (r'<think>(.*?)</think>', re.DOTALL),  # 向后兼容
+            (r'<think>(.*?)</think>', re.DOTALL),  # DeepSeek-R1 标准格式（优先）
+            (r'<think>(.*?)</think>', re.DOTALL),  # 旧协议格式
             (r'<reasoning>(.*?)</reasoning>', re.DOTALL),
             (r'<thought>(.*?)</thought>', re.DOTALL),
             (r'<thinking>(.*?)</thinking>', re.DOTALL),

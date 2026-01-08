@@ -94,14 +94,15 @@ class BaseAgent(ABC):
         try:
             if stream:
                 # 流式输出：直接传递内容，让前端处理 think 标签
-                # DeepSeek 的 think 过程会以 <think>...</think> 标签形式返回
+                # DeepSeek-R1 的 think 过程会以 <think>...</think> 标签形式返回
+                # 也支持旧协议的 <think>...</think> 标签
                 has_yielded = False
                 try:
                     async for chunk in self.llm_client.astream(messages):
                         if chunk.choices and chunk.choices[0].delta.content:
                             content = chunk.choices[0].delta.content
                             if content:
-                                # 直接传递内容，前端会检测和处理 think 标签
+                                # 直接传递内容，前端会检测和处理 think 标签（<think> 或 <think>）
                                 yield content
                                 has_yielded = True
                 except Exception as stream_error:

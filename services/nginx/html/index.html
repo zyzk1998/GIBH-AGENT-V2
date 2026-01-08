@@ -940,15 +940,21 @@
                 let isThinking = false;
                 let hasThoughtBlock = false;
                 let finalAnswer = "";
+                let pendingChunk = "";  // 用于处理跨 chunk 的标签
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
                     
                     const chunk = decoder.decode(value, { stream: true });
-                    fullText += chunk; 
+                    fullText += chunk;
+                    
+                    // 合并待处理的 chunk
+                    const processChunk = pendingChunk + chunk;
+                    pendingChunk = "";
 
-                    if (chunk.includes('<think>')) {
+                    // 检测思考过程开始标签（支持 DeepSeek-R1 的 <think> 和旧协议的 <think>）
+                    if (processChunk.includes('<think>') || processChunk.includes('<think>')) {
                         isThinking = true;
                         hasThoughtBlock = true;
                         if (!aiContentDiv.querySelector('.thought-process')) {
@@ -964,14 +970,25 @@
                         }
                     }
 
-                    if (chunk.includes('</think>')) {
+                    // 检测思考过程结束标签（支持 </think> 和 </think>）
+                    const thinkEndPattern = /<\/think>|<\/redacted_reasoning>/;
+                    if (thinkEndPattern.test(processChunk)) {
                         isThinking = false;
-                        const parts = chunk.split('</think>');
-                        thoughtBuffer += parts[0].replace('<think>', '');
+                        // 处理结束标签
+                        let parts;
+                        if (processChunk.includes('</think>')) {
+                            parts = processChunk.split('</think>');
+                            thoughtBuffer += parts[0].replace(/<think>/g, '');
+                        } else if (processChunk.includes('</think>')) {
+                            parts = processChunk.split('</think>');
+                            thoughtBuffer += parts[0].replace(/<think>/g, '');
+                        }
+                        
                         const thoughtDiv = aiContentDiv.querySelector('.thought-content');
                         if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer;
 
-                        if (parts[1]) {
+                        // 处理结束标签后的内容
+                        if (parts && parts[1]) {
                             finalAnswer += parts[1];
                             const answerDiv = aiContentDiv.querySelector('.final-answer');
                             if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
@@ -979,18 +996,42 @@
                         continue; 
                     }
 
+                    // 处理思考过程中的内容
                     if (isThinking) {
-                        thoughtBuffer += chunk.replace('<think>', '');
+                        // 移除开始标签（如果存在）
+                        let cleanChunk = processChunk.replace(/<think>/g, '').replace(/<think>/g, '');
+                        thoughtBuffer += cleanChunk;
                         const thoughtDiv = aiContentDiv.querySelector('.thought-content');
-                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer; 
+                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer;
                     } else {
+                        // 处理正文内容
                         if (!hasThoughtBlock) {
-                            finalAnswer += chunk;
+                            finalAnswer += processChunk;
                             aiContentDiv.innerHTML = marked.parse(finalAnswer);
                         } else {
-                            finalAnswer += chunk;
+                            finalAnswer += processChunk;
                             const answerDiv = aiContentDiv.querySelector('.final-answer');
                             if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
+                        }
+                    }
+                    
+                    // 检查是否有未完成的标签（跨 chunk 的情况）
+                    // 如果 chunk 末尾有 <think 或 <redacted_reasoning 但没有闭合，保留到下次处理
+                    const incompleteThinkStart = /<think[^>]*$/.test(processChunk);
+                    const incompleteRedactedStart = /<redacted_reasoning[^>]*$/.test(processChunk);
+                    if (incompleteThinkStart || incompleteRedactedStart) {
+                        // 找到最后一个可能的开始标签位置
+                        const lastThinkPos = processChunk.lastIndexOf('<think');
+                        const lastRedactedPos = processChunk.lastIndexOf('<redacted_reasoning');
+                        const lastPos = Math.max(lastThinkPos, lastRedactedPos);
+                        if (lastPos >= 0) {
+                            pendingChunk = processChunk.substring(lastPos);
+                            // 从当前处理的内容中移除这部分
+                            if (isThinking) {
+                                thoughtBuffer = thoughtBuffer.substring(0, thoughtBuffer.length - pendingChunk.length);
+                            } else {
+                                finalAnswer = finalAnswer.substring(0, finalAnswer.length - pendingChunk.length);
+                            }
                         }
                     }
                     

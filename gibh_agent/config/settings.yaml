@@ -28,17 +28,18 @@ llm:
   # 云端模型配置
   cloud:
     # 硅基流动 deepseek API（默认使用）
-    # 注意：模型名称格式为 "Pro/deepseek-ai/DeepSeek-V3.2" 或其他支持的模型
+    # 注意：模型名称格式为 "deepseek-ai/DeepSeek-R1" 或其他支持的模型
     # 可通过环境变量 SILICONFLOW_MODEL 自定义模型名称
     # 常见模型名称：
-    #   - Pro/deepseek-ai/DeepSeek-V3.2（推荐，默认）
+    #   - deepseek-ai/DeepSeek-R1（推荐，支持思考过程流式输出）
+    #   - Pro/deepseek-ai/DeepSeek-V3.2
     #   - deepseek-ai/DeepSeek-V2.5
     #   - deepseek-ai/DeepSeek-V3
     #   - deepseek-ai/deepseek-chat
     siliconflow:
       base_url: "https://api.siliconflow.cn/v1"
       api_key: "${SILICONFLOW_API_KEY:}"
-      model: "${SILICONFLOW_MODEL:Pro/deepseek-ai/DeepSeek-V3.2}"
+      model: "${SILICONFLOW_MODEL:deepseek-ai/DeepSeek-R1}"
       temperature: 0.1
       max_tokens: 4096
     
