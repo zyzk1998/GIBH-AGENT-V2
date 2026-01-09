@@ -1,10 +1,12 @@
-# GIBH-AGENT-V2 (重构版本)
+# Omics Agent
 
 <div align="center">
 
-![GIBH-AGENT Logo](https://via.placeholder.com/150x150.png?text=GIBH-AGENT)
+![Omics Agent Logo](https://via.placeholder.com/150x150.png?text=Omics+Agent)
 
-**基于多模态大模型与微服务架构的生物信息学分析智能体平台**
+**基于多模态大模型与微服务架构的多组学数据分析智能体平台**
+
+**支持 7 种组学模态：转录组、基因组、表观遗传、代谢组、蛋白质组、空间组学、影像分析**
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -19,26 +21,27 @@
 
 ## 📖 项目简介
 
-**GIBH-AGENT-V2** 是一款企业级生物信息学分析平台，旨在通过自然语言交互（Chat）实现多组学数据的全流程自动化分析。
+**Omics Agent** 是一款企业级多组学数据分析平台，旨在通过自然语言交互（Chat）实现多组学数据的全流程自动化分析。
 
-系统采用 **DeepSeek-V3.2** 多模态大模型作为核心大脑，结合 **Scanpy**、**Cell Ranger** 等强大的计算引擎，让科研人员可以通过对话完成从数据质控（QC）、降维聚类到细胞注释的复杂分析任务。
+系统采用 **DeepSeek-R1** 多模态大模型作为核心大脑，结合 **Scanpy**、**Cell Ranger** 等强大的计算引擎，让科研人员可以通过对话完成从数据质控（QC）、降维聚类到细胞注释的复杂分析任务。
 
 ### ✨ 核心亮点
 
+- **🧬 7 种组学模态支持**：转录组、基因组、表观遗传、代谢组、蛋白质组、空间组学、影像分析
 - **🤖 多模态交互**：支持图文对话，不仅能听懂"帮我分析这个数据"，还能识别并解读生信图表。
 - **⚡ 自动化工作流**：内置标准单细胞分析 Pipeline (QC -> Normalize -> PCA -> Neighbors -> UMAP -> Clustering)。
 - **🔒 数据隐私安全**：支持本地化部署（Local LLM）和云端 API（SiliconFlow）灵活切换，保障科研数据安全。
 - **📊 出版级绘图**：自动生成符合 SCI 发表标准的矢量图表（300 DPI+）。
-- **🚀 多智能体架构**：从单体脚本重构为分层多智能体系统，支持7种组学模态扩展。
+- **🚀 多智能体架构**：分层多智能体系统，每个组学模态都有专门的智能体负责。
 
 ---
 
 ## 🏗 技术架构
 
 <div align="center">
-  <img src="./System Architecture" width="400" alt="GIBH-AGENT-V2 System Architecture">
+  <img src="./System Architecture" width="400" alt="Omics Agent System Architecture">
   <br>
-  <em>GIBH-AGENT-V2 微服务交互架构图</em>
+  <em>Omics Agent 微服务交互架构图</em>
 </div>
 
 <br>
@@ -108,6 +111,7 @@ TaskDispatcher (任务分发器) - 提交到 HPC 集群
 # 1. 克隆仓库
 git clone https://github.com/zyzk1998/GIBH-AGENT-V2.git
 cd GIBH-AGENT-V2
+# 注意：项目文件夹名称保持为 GIBH-AGENT-V2（避免导入错误），但产品名称为 Omics Agent
 
 # 2. 配置环境变量（可选）
 # 编辑 docker-compose.yml 中的 SILICONFLOW_API_KEY 和 SILICONFLOW_MODEL
@@ -272,7 +276,7 @@ docker compose exec api-server bash
 
 ## 📄 版权说明
 
-Copyright © 2025 GIBH-AGENT Team. All Rights Reserved.
+Copyright © 2025 Omics Agent Team. All Rights Reserved.
 本项目为商业版代码，未经授权禁止商用分发。
 
 ---
@@ -288,6 +292,6 @@ Copyright © 2025 GIBH-AGENT Team. All Rights Reserved.
 
 <div align="center">
 
-**Made with ❤️ by GIBH-AGENT Team**
+**Made with ❤️ by Omics Agent Team**
 
 </div>
