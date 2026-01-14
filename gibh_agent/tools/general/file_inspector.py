@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 @registry.register(
-    name="file_inspect",
+    name="inspect_data",
     description="Inspects a file and returns basic metadata: file size, type, number of rows/columns (for tabular files), and a preview of the first few rows.",
     category="General",
     output_type="json"
