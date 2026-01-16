@@ -62,6 +62,22 @@ def run_pca(
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         data = df[numeric_cols]
         
+        # 🔥 检查数据维度
+        n_samples, n_features = data.shape
+        if n_features < 2:
+            return {
+                "status": "error",
+                "error": f"PCA 需要至少 2 个特征，但数据只有 {n_features} 个特征。请检查数据预处理步骤是否正确保留了代谢物列。",
+                "data_shape": {"rows": n_samples, "columns": n_features}
+            }
+        
+        # 🔥 自动调整 n_components（不能超过 min(n_samples, n_features)）
+        max_components = min(n_samples, n_features)
+        actual_n_components = min(n_components, max_components)
+        
+        if actual_n_components < n_components:
+            logger.warning(f"⚠️ 请求的 n_components={n_components} 超过数据维度限制 (min({n_samples}, {n_features})={max_components})，自动调整为 {actual_n_components}")
+        
         # 数据预处理
         if scale:
             scaler = StandardScaler()
@@ -70,14 +86,14 @@ def run_pca(
             data_scaled = data.values
         
         # 执行 PCA
-        pca = PCA(n_components=n_components)
+        pca = PCA(n_components=actual_n_components)
         pca_coords = pca.fit_transform(data_scaled)
         
         # 创建结果 DataFrame
         coords_df = pd.DataFrame(
             pca_coords,
             index=data.index,
-            columns=[f"PC{i+1}" for i in range(n_components)]
+            columns=[f"PC{i+1}" for i in range(actual_n_components)]
         )
         
         # 生成图片（如果指定了输出目录）
@@ -103,7 +119,10 @@ def run_pca(
                 f"PC{i+1}": float(ratio) 
                 for i, ratio in enumerate(pca.explained_variance_ratio_)
             },
-            "plot_path": plot_path
+            "plot_path": plot_path,
+            "n_components": actual_n_components,
+            "requested_n_components": n_components,
+            "data_shape": {"rows": n_samples, "columns": n_features}
         }
     
     except Exception as e:
